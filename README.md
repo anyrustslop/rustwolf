@@ -1,5 +1,11 @@
 # RustWolf
 
+> [!WARNING]
+> **RustWolf is experimental and really unstable. It is not meant for daily use yet.**
+> It is built on Servo, a young web engine: many sites break or don't render fully, video doesn't play, and pages can crash.
+> It has not been security-audited, and Servo's page sandbox doesn't exist on Windows yet.
+> For banking, email, shopping and anything important, use an established browser such as Firefox or LibreWolf.
+
 A privacy-first web browser **written in Rust**, built on **[Servo](https://servo.org)**, the web engine written in Rust.
 
 ![RustWolf](screenshots/guardian.png)
