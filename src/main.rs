@@ -13,6 +13,7 @@ mod keyutils;
 #[allow(dead_code)]
 mod logo;
 mod ui;
+mod vault;
 
 use std::cell::{Cell, OnceCell, RefCell};
 use std::collections::HashSet;
@@ -76,7 +77,7 @@ pub fn host_of(url: &str) -> String {
 }
 
 /// Rough "same site" check (example.com vs cdn.example.com).
-fn base_domain(host: &str) -> String {
+pub fn base_domain(host: &str) -> String {
     let parts: Vec<&str> = host.split('.').collect();
     let n = if parts.len() >= 3 && parts[parts.len() - 2].len() <= 3 && parts[parts.len() - 1].len() == 2 { 3 } else { 2 };
     parts[parts.len().saturating_sub(n)..].join(".")
@@ -231,7 +232,7 @@ fn inject_css(w: &WebView, id: &str, css: &str) {
     w.evaluate_javascript(js, |_| {});
 }
 
-fn js_string(s: &str) -> String {
+pub fn js_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
     for ch in s.chars() {
@@ -287,6 +288,10 @@ pub enum Action {
     Stop,
     Home,
     ToggleShield,
+    VaultCheck,
+    VaultUnlock,
+    VaultLock,
+    VaultFill(usize),
     FocusAddress,
     /// Open a blocked dangerous page anyway (shield off for that site).
     Proceed(String),
@@ -324,6 +329,7 @@ pub struct Browser {
     lists_rx: std::sync::mpsc::Receiver<blocker::Blocker>,
     guard_cooldown: std::time::Instant,
     lists_ready: bool,
+    vault: vault::Vault,
     /// Address given on the command line, opened once the protection lists are loaded.
     pending_url: Option<String>,
 }
@@ -428,6 +434,7 @@ impl Browser {
             lists_rx,
             guard_cooldown: std::time::Instant::now(),
             lists_ready: false,
+            vault: vault::Vault::new(proxy.clone()),
             pending_url: None,
         };
         b.ui.focus_address = true;
@@ -583,6 +590,23 @@ impl Browser {
                 self.ui.focus_address = true;
                 self.page_focused = false;
             }
+            Action::VaultCheck => self.vault.check_status(),
+            Action::VaultUnlock => {
+                let pw = std::mem::take(&mut self.ui.vault_password);
+                self.vault.unlock(pw);
+            }
+            Action::VaultLock => self.vault.lock(),
+            Action::VaultFill(i) => {
+                // Check again, right now, that the page is on the login's site.
+                let url = self.tabs[self.active].url.clone();
+                let host = host_of(&url);
+                if let (Some(login), Some(w)) = (self.vault.matches.get(i).cloned(), self.active_webview()) {
+                    if !host.is_empty() && base_domain(&host) == login.site && url.starts_with("http") {
+                        w.evaluate_javascript(vault::fill_script(&login.username, &login.password), |_| {});
+                        self.page_focused = true;
+                    }
+                }
+            }
             Action::ToggleShield => {
                 let host = host_of(&self.tabs[self.active].url);
                 if host.is_empty() {
@@ -725,6 +749,8 @@ impl Browser {
 
     fn redraw(&mut self) {
         self.handle_servo_events();
+        let url = self.tabs[self.active].url.clone();
+        self.vault.page_changed(&url);
         let page_rc = self.page_rc().clone();
         let scale = self.window.scale_factor() as f32;
         let mut actions = Vec::new();
@@ -733,10 +759,10 @@ impl Browser {
 
         // Build the UI. The page itself is painted by a GL callback into the area the UI leaves free.
         {
-            let Browser { egui, ui, tabs, active: active_i, shared, window, .. } = self;
+            let Browser { egui, ui, tabs, active: active_i, shared, window, vault, .. } = self;
             let ctx_scale = scale;
             egui.run(window, |ctx| {
-                let page = ui::draw(ctx, ui, tabs, *active_i, &shared.blocker.borrow(), &shared.shields_off.borrow(), &mut actions);
+                let page = ui::draw(ctx, ui, tabs, *active_i, &shared.blocker.borrow(), &shared.shields_off.borrow(), vault, &mut actions);
                 page_rect_px = Rect::new(
                     Point2D::new(page.min.x * ctx_scale, page.min.y * ctx_scale),
                     Size2D::new(page.width() * ctx_scale, page.height() * ctx_scale),
@@ -783,6 +809,10 @@ impl Browser {
 
     /// Picks up freshly loaded filter lists, and stops a page that eats too much memory.
     fn background_checks(&mut self) {
+        let url = self.tabs[self.active].url.clone();
+        if self.vault.poll(&url) {
+            self.window.request_redraw();
+        }
         while let Ok(full) = self.lists_rx.try_recv() {
             *self.shared.blocker.borrow_mut() = full;
             self.lists_ready = true;
@@ -870,7 +900,33 @@ impl Browser {
         true
     }
 
+    /// Where the pointer really is (asks Windows). Some input tools click without sending
+    /// movement events first; this keeps clicks landing in the right place.
+    fn os_cursor_position(&self) -> Option<PhysicalPosition<f64>> {
+        use windows_sys::Win32::Foundation::POINT;
+        use windows_sys::Win32::Graphics::Gdi::ScreenToClient;
+        use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let handle = self.window.window_handle().ok()?;
+        let winit::raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() else { return None };
+        let mut p = POINT { x: 0, y: 0 };
+        unsafe {
+            if GetCursorPos(&mut p) == 0 || ScreenToClient(h.hwnd.get() as _, &mut p) == 0 {
+                return None;
+            }
+        }
+        Some(PhysicalPosition::new(p.x as f64, p.y as f64))
+    }
+
     fn window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+        if matches!(event, WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }) {
+            if let Some(pos) = self.os_cursor_position() {
+                if pos != self.mouse_window {
+                    #[allow(unused_unsafe)]
+                    let device_id = unsafe { winit::event::DeviceId::dummy() };
+                    self.window_event(event_loop, WindowEvent::CursorMoved { device_id, position: pos });
+                }
+            }
+        }
         self.servo.spin_event_loop();
         match &event {
             WindowEvent::CloseRequested => {
@@ -922,6 +978,9 @@ impl Browser {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if std::env::var_os("RUSTWOLF_DEBUG_INPUT").is_some() {
+                    eprintln!("[input] {:?} {:?} at {:?} page_rect={:?} over_page={} page_focused={}", state, button, self.mouse_window, self.page_rect.get(), self.over_page(self.mouse_window), self.page_focused);
+                }
                 if *state == ElementState::Pressed && *button == MouseButton::Back {
                     self.apply(Action::Back);
                     return;

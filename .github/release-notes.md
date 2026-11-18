@@ -21,6 +21,9 @@ The full source code is attached as **Source code (zip / tar.gz)**.
 - WebRTC, WebGL, WebGPU, location, notifications, Bluetooth and more are switched off; permission requests are denied.
 - Private by default: cookies, cache and history stay in memory and are forgotten when RustWolf closes. No telemetry.
 
+## Bitwarden autofill
+Click the key button next to the shield to unlock your Bitwarden vault (through Bitwarden's official CLI: `winget install Bitwarden.CLI`, then `bw login` once) and fill saved logins on matching sites.
+
 ## Safety
 - Every page runs in its own process.
 - Memory guard: a page using more than 2 GB is stopped within a quarter of a second, so one heavy site can't freeze your PC.

@@ -28,6 +28,7 @@ mod icon {
     pub const UNLOCK: &str = "\u{E785}";
     pub const SEARCH: &str = "\u{E721}";
     pub const GLOBE: &str = "\u{E774}";
+    pub const KEY: &str = "\u{E8D7}";
 }
 
 pub struct UiState {
@@ -36,6 +37,9 @@ pub struct UiState {
     pub focus_address: bool,
     pub blur: bool,
     pub shield_open: bool,
+    pub vault_open: bool,
+    /// Master password being typed (cleared as soon as it's handed to Bitwarden).
+    pub vault_password: String,
     pub popup_open: bool,
     /// The user changed the address text since focusing it.
     pub typed: bool,
@@ -44,7 +48,7 @@ pub struct UiState {
 
 impl UiState {
     pub fn new() -> Self {
-        Self { address: String::new(), editing: false, focus_address: false, blur: false, shield_open: false, popup_open: false, typed: false, logo: None }
+        Self { address: String::new(), editing: false, focus_address: false, blur: false, shield_open: false, vault_open: false, vault_password: String::new(), popup_open: false, typed: false, logo: None }
     }
 }
 
@@ -161,7 +165,7 @@ fn icon_button(ui: &mut egui::Ui, glyph: &str, enabled: bool, tip: &str) -> egui
 }
 
 /// Draws the whole interface and returns the rectangle left for the web page (in points).
-pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, blocker: &Blocker, shields_off: &HashSet<String>, actions: &mut Vec<Action>) -> Rect {
+pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, blocker: &Blocker, shields_off: &HashSet<String>, vault: &crate::vault::Vault, actions: &mut Vec<Action>) -> Rect {
     let tab = &tabs[active];
     if !st.editing {
         st.address = tab.url.clone();
@@ -253,7 +257,7 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
             // Address bar.
             let host = host_of(&tab.url);
             let shield_on = !shields_off.contains(&host);
-            let bar_w = ui.available_width() - 60.0;
+            let bar_w = ui.available_width() - 112.0;
             let (bar, _) = ui.allocate_exact_size(vec2(bar_w, 34.0), Sense::hover());
             let focused_id = egui::Id::new("address");
             let has_focus = ui.memory(|m| m.has_focus(focused_id));
@@ -304,8 +308,28 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
                 st.editing = false;
             }
 
-            // Shield button with the blocked counter.
+            // Bitwarden button: shows how many saved logins match this site.
             ui.add_space(6.0);
+            let (krect, kresp) = ui.allocate_exact_size(vec2(46.0, 34.0), Sense::click());
+            let kh = ui.ctx().animate_bool(kresp.id, kresp.hovered() || st.vault_open);
+            ui.painter().rect_filled(krect, 9.0, HOVER.linear_multiply(kh));
+            let unlocked = vault.state == crate::vault::State::Unlocked;
+            let kcol = if unlocked && !vault.matches.is_empty() { RED } else if unlocked { TEXT } else { SUBTLE };
+            ui.painter().text(krect.center() - vec2(6.0, 0.0), Align2::CENTER_CENTER, icon::KEY, icons(16.0), kcol);
+            if unlocked && !vault.matches.is_empty() {
+                let badge = Rect::from_center_size(krect.center() + vec2(11.0, 7.0), vec2(18.0, 15.0));
+                ui.painter().rect_filled(badge, 7.0, RED);
+                ui.painter().text(badge.center(), Align2::CENTER_CENTER, vault.matches.len().to_string(), FontId::proportional(10.0), Color32::WHITE);
+            }
+            if kresp.on_hover_text("Bitwarden logins").clicked() {
+                st.vault_open = !st.vault_open;
+                st.shield_open = false;
+                if st.vault_open {
+                    actions.push(Action::VaultCheck);
+                }
+            }
+
+            // Shield button with the blocked counter.
             let (srect, sresp) = ui.allocate_exact_size(vec2(46.0, 34.0), Sense::click());
             let h = ui.ctx().animate_bool(sresp.id, sresp.hovered() || st.shield_open);
             ui.painter().rect_filled(srect, 9.0, HOVER.linear_multiply(h));
@@ -319,6 +343,7 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
             }
             if sresp.on_hover_text("Tracker shield").clicked() {
                 st.shield_open = !st.shield_open;
+                st.vault_open = false;
             }
         });
     });
@@ -330,6 +355,13 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
         let w = bar_rect.width() * 0.3;
         let x = bar_rect.left() - w + (bar_rect.width() + w) * t;
         root.painter().with_clip_rect(bar_rect).rect_filled(Rect::from_min_size(Pos2::new(x, bar_rect.top()), vec2(w, 2.0)), 1.0, RED);
+    }
+
+    // ---------- Bitwarden panel
+    if st.vault_open {
+        egui::Panel::right("vault").exact_size(300.0).frame(Frame::new().fill(CHROME).inner_margin(Margin::same(16))).show_inside(root, |ui| {
+            vault_panel(ui, st, vault, &tab.url, actions);
+        });
     }
 
     // ---------- shield panel (takes space from the page, never covers it)
@@ -387,6 +419,92 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
         }
     });
     page
+}
+
+fn vault_panel(ui: &mut egui::Ui, st: &mut UiState, vault: &crate::vault::Vault, url: &str, actions: &mut Vec<Action>) {
+    use crate::vault::State;
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(icon::KEY).font(icons(18.0)).color(RED));
+        ui.label(egui::RichText::new("Bitwarden").size(17.0).strong());
+    });
+    ui.add_space(8.0);
+    let small = |t: &str| egui::RichText::new(t.to_string()).size(12.5).color(SUBTLE);
+    match vault.state {
+        State::Checking => {
+            ui.label(small("Checking Bitwarden…"));
+        }
+        State::NoCli => {
+            ui.label("RustWolf fills your Bitwarden logins through Bitwarden's official command-line tool.");
+            ui.add_space(6.0);
+            ui.label(small("Install it once (in PowerShell):"));
+            ui.add(egui::TextEdit::singleline(&mut "winget install Bitwarden.CLI".to_string()).font(FontId::monospace(12.0)).desired_width(268.0));
+            ui.label(small("Then log in once with:  bw login"));
+            ui.add_space(8.0);
+            if ui.button("Check again").clicked() {
+                actions.push(Action::VaultCheck);
+            }
+        }
+        State::LoggedOut => {
+            ui.label("Bitwarden CLI is installed but not logged in.");
+            ui.label(small("Log in once in PowerShell with:  bw login"));
+            ui.add_space(8.0);
+            if ui.button("Check again").clicked() {
+                actions.push(Action::VaultCheck);
+            }
+        }
+        State::Locked => {
+            if let Some(e) = &vault.email {
+                ui.label(small(e));
+            }
+            ui.label("Unlock your vault to fill logins on this site.");
+            ui.add_space(6.0);
+            let resp = ui.add(
+                egui::TextEdit::singleline(&mut st.vault_password)
+                    .password(true)
+                    .hint_text("Master password")
+                    .desired_width(268.0),
+            );
+            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            ui.add_space(6.0);
+            let label = if vault.busy { "Unlocking…" } else { "Unlock" };
+            if (ui.add_enabled(!vault.busy, egui::Button::new(egui::RichText::new(label).color(Color32::WHITE)).fill(RED).min_size(vec2(268.0, 32.0))).clicked() || enter)
+                && !st.vault_password.is_empty()
+            {
+                actions.push(Action::VaultUnlock);
+            }
+            ui.label(small("Your master password goes straight to Bitwarden's tool and is never stored."));
+        }
+        State::Unlocked => {
+            let host = host_of(url);
+            if host.is_empty() {
+                ui.label(small("Open a website to see its saved logins."));
+            } else if vault.matches.is_empty() {
+                ui.label(small(&format!("No saved logins for {host}.")));
+            } else {
+                ui.label(small(&format!("Saved logins for {host}:")));
+                ui.add_space(4.0);
+                for (i, l) in vault.matches.iter().enumerate() {
+                    egui::Frame::new().fill(RAISED).corner_radius(10.0).inner_margin(Margin::same(10)).show(ui, |ui| {
+                        ui.set_width(256.0);
+                        ui.label(egui::RichText::new(if l.name.is_empty() { &l.site } else { &l.name }).strong());
+                        ui.label(small(if l.username.is_empty() { "(no username)" } else { &l.username }));
+                        if ui.add(egui::Button::new(egui::RichText::new("Fill").color(Color32::WHITE)).fill(RED).min_size(vec2(80.0, 28.0))).clicked() {
+                            actions.push(Action::VaultFill(i));
+                        }
+                    });
+                    ui.add_space(4.0);
+                }
+            }
+            ui.add_space(10.0);
+            if ui.button("Lock vault").clicked() {
+                actions.push(Action::VaultLock);
+            }
+        }
+    }
+    if let Some(e) = &vault.error {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new(e).size(12.5).color(RED_HI));
+    }
 }
 
 fn notice_page(ui: &mut egui::Ui, n: &crate::Notice, actions: &mut Vec<Action>) {

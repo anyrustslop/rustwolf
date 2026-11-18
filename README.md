@@ -25,6 +25,14 @@ Releases are built by [GitHub Actions](.github/workflows/build.yml) for every ve
 - **Private by default:** cookies, cache and history live in memory only; closing RustWolf forgets everything.
 - **No telemetry** of any kind.
 
+## Bitwarden autofill
+RustWolf can't run browser extensions (Servo doesn't support them), so it talks to **Bitwarden's official command-line tool** instead:
+1. Install it once: `winget install Bitwarden.CLI`, then log in once with `bw login`.
+2. In RustWolf, click the **key** button next to the shield, unlock with your master password, then click **Fill** on a saved login.
+
+- A login is only offered when its saved address is on the same site as the page, and RustWolf checks again at the moment it fills (protects against phishing pages).
+- Your master password and session key are only passed to Bitwarden's tool in memory (never on a command line), are never saved, and closing RustWolf or pressing **Lock vault** locks the vault again.
+
 ## Safety & speed
 - **Each page runs in its own process**, so a bad page can't reach the browser.
 - **Memory guard:** a page process using more than 2 GB (less on PCs with under 12 GB of RAM) is stopped within a quarter of a second (only that page); Windows caps every RustWolf process too, so one heavy site can never freeze your PC.
