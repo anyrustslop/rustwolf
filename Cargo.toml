@@ -1,6 +1,6 @@
 [package]
 name = "rustwolf"
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 description = "RustWolf - a privacy-first web browser written in Rust, on the Servo engine"
 license = "MPL-2.0"
@@ -21,7 +21,7 @@ euclid = "0.22"
 url = "2.5"
 http = "1"
 adblock = { version = "0.13", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_JobObjects", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_JobObjects", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_Controls"] }
 ureq = "2"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }

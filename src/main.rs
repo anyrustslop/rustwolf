@@ -402,6 +402,10 @@ pub enum Action {
     ToggleShield,
     VaultCheck,
     OpenSettings,
+    DragWindow,
+    ToggleMaximize,
+    Minimize,
+    CloseWindow,
     OpenInNewTab(String),
     AlertDismiss,
     AlertCopy,
@@ -451,6 +455,7 @@ pub struct Browser {
     update_rx: std::sync::mpsc::Receiver<(String, String)>,
     tor: Option<tor::Tor>,
     exit_requested: bool,
+    on_edge: bool,
     lists_tx: std::sync::mpsc::Sender<blocker::Blocker>,
     proxy: EventLoopProxy<()>,
     vault: vault::Vault,
@@ -466,8 +471,10 @@ impl Browser {
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 820.0))
             .with_min_inner_size(winit::dpi::LogicalSize::new(640.0, 420.0))
             .with_theme(Some(winit::window::Theme::Dark))
-            .with_window_icon(icon);
+            .with_window_icon(icon)
+            .with_decorations(false); // RustWolf draws its own title bar in the tab strip
         let window = Rc::new(event_loop.create_window(attrs).expect("create window"));
+        style_window(&window);
         let display = event_loop.display_handle().expect("display handle");
         let handle = window.window_handle().expect("window handle");
         let window_rc = Rc::new(WindowRenderingContext::new(display, handle, window.inner_size()).expect("GL context"));
@@ -578,6 +585,7 @@ impl Browser {
             update_rx,
             tor,
             exit_requested: false,
+            on_edge: false,
             lists_tx,
             proxy: proxy.clone(),
             vault: vault::Vault::new(proxy.clone()),
@@ -787,6 +795,15 @@ impl Browser {
                     self.apply(Action::Reload);
                 }
             }
+            Action::DragWindow => {
+                let _ = self.window.drag_window();
+            }
+            Action::ToggleMaximize => self.window.set_maximized(!self.window.is_maximized()),
+            Action::Minimize => self.window.set_minimized(true),
+            Action::CloseWindow => {
+                self.exit_requested = true;
+                self.window.request_redraw();
+            }
             Action::OpenSettings => {
                 self.ui.draft = self.shared.settings.borrow().clone();
                 self.ui.setup_step = 1;
@@ -982,6 +999,7 @@ impl Browser {
 
     fn redraw(&mut self) {
         self.handle_servo_events();
+        self.ui.maximized = self.window.is_maximized();
         let url = self.tabs[self.active].url.clone();
         self.vault.page_changed(&url);
         let page_rc = self.page_rc().clone();
@@ -1090,6 +1108,28 @@ impl Browser {
                 });
                 self.window.request_redraw();
             }
+        }
+    }
+
+    /// Which window edge (if any) is under the pointer: the borderless window resizes from there.
+    fn resize_edge(&self, p: PhysicalPosition<f64>) -> Option<winit::window::ResizeDirection> {
+        use winit::window::ResizeDirection as D;
+        if self.window.is_maximized() {
+            return None;
+        }
+        let size = self.window.inner_size();
+        let b = 6.0 * self.window.scale_factor();
+        let (l, r, t, bt) = (p.x < b, p.x > size.width as f64 - b, p.y < b, p.y > size.height as f64 - b);
+        match (l, r, t, bt) {
+            (true, _, true, _) => Some(D::NorthWest),
+            (_, true, true, _) => Some(D::NorthEast),
+            (true, _, _, true) => Some(D::SouthWest),
+            (_, true, _, true) => Some(D::SouthEast),
+            (true, ..) => Some(D::West),
+            (_, true, ..) => Some(D::East),
+            (_, _, true, _) => Some(D::North),
+            (.., true) => Some(D::South),
+            _ => None,
         }
     }
 
@@ -1222,6 +1262,20 @@ impl Browser {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_window = *position;
+                let edge = self.resize_edge(*position);
+                if edge.is_some() || self.on_edge {
+                    self.window.set_cursor(match edge {
+                        Some(winit::window::ResizeDirection::East | winit::window::ResizeDirection::West) => winit::window::CursorIcon::EwResize,
+                        Some(winit::window::ResizeDirection::North | winit::window::ResizeDirection::South) => winit::window::CursorIcon::NsResize,
+                        Some(winit::window::ResizeDirection::NorthWest | winit::window::ResizeDirection::SouthEast) => winit::window::CursorIcon::NwseResize,
+                        Some(_) => winit::window::CursorIcon::NeswResize,
+                        None => winit::window::CursorIcon::Default,
+                    });
+                    self.on_edge = edge.is_some();
+                }
+                if edge.is_some() {
+                    return;
+                }
                 let r = self.page_rect.get();
                 let was_inside = r.size.width > 0.0 && Rect::from_size(r.size).contains(self.mouse);
                 self.mouse = Point2D::new(position.x as f32 - r.min_x(), position.y as f32 - r.min_y());
@@ -1234,6 +1288,12 @@ impl Browser {
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                if *state == ElementState::Pressed && *button == MouseButton::Left {
+                    if let Some(dir) = self.resize_edge(self.mouse_window) {
+                        let _ = self.window.drag_resize_window(dir);
+                        return;
+                    }
+                }
                 if std::env::var_os("RUSTWOLF_DEBUG_INPUT").is_some() {
                     eprintln!("[input] {:?} {:?} at {:?} page_rect={:?} over_page={} page_focused={}", state, button, self.mouse_window, self.page_rect.get(), self.over_page(self.mouse_window), self.page_focused);
                 }
@@ -1325,6 +1385,23 @@ impl ApplicationHandler<()> for App {
 
 /// Runs RustWolf below normal priority, so a heavy page can never make Windows itself lag:
 /// your other apps (and the mouse, the taskbar…) always get the CPU first.
+/// Windows 11 look for the borderless window: rounded corners, dark frame and the drop shadow.
+fn style_window(window: &Window) {
+    use windows_sys::Win32::Graphics::Dwm::{DwmExtendFrameIntoClientArea, DwmSetWindowAttribute};
+    use windows_sys::Win32::UI::Controls::MARGINS;
+    let Ok(handle) = window.window_handle() else { return };
+    let winit::raw_window_handle::RawWindowHandle::Win32(h) = handle.as_raw() else { return };
+    let hwnd = h.hwnd.get() as _;
+    unsafe {
+        let round: u32 = 2; // DWMWCP_ROUND
+        DwmSetWindowAttribute(hwnd, 33, &round as *const u32 as *const _, 4); // DWMWA_WINDOW_CORNER_PREFERENCE
+        let dark: u32 = 1;
+        DwmSetWindowAttribute(hwnd, 20, &dark as *const u32 as *const _, 4); // DWMWA_USE_IMMERSIVE_DARK_MODE
+        let m = MARGINS { cxLeftWidth: 1, cxRightWidth: 1, cyTopHeight: 1, cyBottomHeight: 1 };
+        DwmExtendFrameIntoClientArea(hwnd, &m);
+    }
+}
+
 fn lower_priority() {
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS};
     unsafe {

@@ -21,6 +21,10 @@ The full source code is attached as **Source code (zip / tar.gz)**.
 - WebRTC, WebGL, WebGPU, location, notifications, Bluetooth and more are switched off; permission requests are denied.
 - Private by default: cookies, cache and history stay in memory and are forgotten when RustWolf closes. No telemetry.
 
+## New in 0.5.1
+- Firefox-style window: no Windows title bar; minimize / maximize / close sit at the top right of the tab strip (drag the empty space to move, double-click to maximize, resize from the edges).
+- Bitwarden button shows a Bitwarden-style shield; the Tor status shows an onion.
+
 ## New in 0.5
 - **Anti-ClickFix:** pages can't put commands (PowerShell, cmd, mshta, curl | sh…) in your clipboard; RustWolf blocks them and explains the scam. Your own Ctrl+C is never blocked.
 - **Hardened mode** (in Strict): JavaScript JIT and WebAssembly off, closing the most-attacked part of the engine.

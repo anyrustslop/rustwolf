@@ -28,7 +28,6 @@ mod icon {
     pub const UNLOCK: &str = "\u{E785}";
     pub const SEARCH: &str = "\u{E721}";
     pub const GLOBE: &str = "\u{E774}";
-    pub const KEY: &str = "\u{E8D7}";
 }
 
 pub struct UiState {
@@ -44,6 +43,7 @@ pub struct UiState {
     /// Tor connection shown in the toolbar: (ready, failed, status text).
     pub tor: Option<(bool, bool, String)>,
     pub restart_needed: bool,
+    pub maximized: bool,
     /// Newer release on GitHub: (version tag, release page).
     pub update: Option<(String, String)>,
     pub vault_open: bool,
@@ -57,7 +57,7 @@ pub struct UiState {
 
 impl UiState {
     pub fn new() -> Self {
-        Self { address: String::new(), editing: false, focus_address: false, blur: false, shield_open: false, setup_open: false, setup_step: 0, tor: None, restart_needed: false, update: None, draft: crate::settings::Settings::recommended(), vault_open: false, vault_password: String::new(), popup_open: false, typed: false, logo: None }
+        Self { address: String::new(), editing: false, focus_address: false, blur: false, shield_open: false, setup_open: false, setup_step: 0, tor: None, restart_needed: false, maximized: false, update: None, draft: crate::settings::Settings::recommended(), vault_open: false, vault_password: String::new(), popup_open: false, typed: false, logo: None }
     }
 }
 
@@ -152,6 +152,34 @@ pub fn to_color_image(image: &servo::Image) -> egui::ColorImage {
     }
 }
 
+/// Small Bitwarden-style mark (blue shield) for the password-manager button.
+pub fn bitwarden_icon(p: &egui::Painter, c: Pos2, size: f32, dim: bool) {
+    let s = size / 2.0;
+    let blue = if dim { Color32::from_rgb(70, 100, 150) } else { Color32::from_rgb(23, 93, 220) };
+    let shield = |k: f32| -> Vec<Pos2> {
+        let (w, top, mid, bot) = (s * 0.9 * k, -s * 0.95 * k, s * 0.25 * k, s * 1.0 * k);
+        vec![
+            c + vec2(-w, top), c + vec2(w, top), c + vec2(w, mid), c + vec2(w * 0.55, bot * 0.72), c + vec2(0.0, bot),
+            c + vec2(-w * 0.55, bot * 0.72), c + vec2(-w, mid),
+        ]
+    };
+    p.add(egui::Shape::convex_polygon(shield(1.0), blue, Stroke::NONE));
+    // Inner half-shield, like Bitwarden's mark.
+    let inner = shield(0.62);
+    let half: Vec<Pos2> = inner.iter().map(|q| Pos2::new(q.x.max(c.x), q.y)).collect();
+    p.add(egui::Shape::convex_polygon(half, Color32::WHITE.linear_multiply(if dim { 0.6 } else { 0.95 }), Stroke::NONE));
+}
+
+/// Small Tor-style onion mark.
+pub fn tor_icon(p: &egui::Painter, c: Pos2, size: f32, color: Color32) {
+    let r = size / 2.0;
+    p.circle_filled(c + vec2(0.0, r * 0.12), r * 0.88, color);
+    p.circle_stroke(c + vec2(0.0, r * 0.12), r * 0.58, Stroke::new(1.3_f32, Color32::from_rgb(30, 18, 45)));
+    p.circle_stroke(c + vec2(0.0, r * 0.12), r * 0.28, Stroke::new(1.3_f32, Color32::from_rgb(30, 18, 45)));
+    // little sprout on top
+    p.line_segment([c + vec2(0.0, -r * 0.7), c + vec2(r * 0.35, -r * 1.05)], Stroke::new(1.6_f32, color));
+}
+
 pub fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
     let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t.clamp(0.0, 1.0)) as u8;
     Color32::from_rgba_unmultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
@@ -200,7 +228,7 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
             let lg = logo(ui, st);
             ui.add(egui::Image::new((lg, vec2(22.0, 22.0))));
             ui.add_space(6.0);
-            let avail = ui.available_width() - 44.0;
+            let avail = ui.available_width() - 44.0 - 190.0; // room for "+", a drag area and the window buttons
             let w = (avail / tabs.len() as f32).clamp(60.0, 230.0);
             for (i, t) in tabs.iter().enumerate() {
                 let (rect, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::click());
@@ -251,6 +279,32 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
             if icon_button(ui, icon::ADD, true, "New tab (Ctrl+T)").clicked() {
                 actions.push(Action::NewTab);
             }
+            // Empty space = title bar: drag to move the window, double-click to maximize.
+            let drag_w = (ui.available_width() - 3.0 * 46.0).max(0.0);
+            let (_, drag) = ui.allocate_exact_size(vec2(drag_w, 36.0), Sense::click_and_drag());
+            if drag.double_clicked() {
+                actions.push(Action::ToggleMaximize);
+            } else if drag.drag_started() {
+                actions.push(Action::DragWindow);
+            }
+            // Window buttons, top right (like Firefox).
+            let restore = st.maximized;
+            for (glyph, action, close) in [
+                ("\u{E921}", Action::Minimize, false),
+                (if restore { "\u{E923}" } else { "\u{E922}" }, Action::ToggleMaximize, false),
+                ("\u{E8BB}", Action::CloseWindow, true),
+            ] {
+                let (r, resp) = ui.allocate_exact_size(vec2(46.0, 36.0), Sense::click());
+                let r = Rect::from_min_max(Pos2::new(r.left(), r.top() - 6.0), r.max); // reach the window's top edge
+                if resp.hovered() {
+                    ui.painter().rect_filled(r, 0.0, if close { Color32::from_rgb(196, 43, 28) } else { HOVER });
+                }
+                let col = if close && resp.hovered() { Color32::WHITE } else { TEXT };
+                ui.painter().text(r.center(), Align2::CENTER_CENTER, glyph, icons(10.0), col);
+                if resp.clicked() {
+                    actions.push(action);
+                }
+            }
         });
     });
 
@@ -298,7 +352,11 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
                 } else {
                     (status.trim_start_matches("Connecting to Tor… ").replace("Connecting to the Tor network…", "Tor…").replace("Downloading Tor from torproject.org…", "Tor ↓"), SUBTLE)
                 };
-                let label = if txt.ends_with('%') { format!("Tor {txt}") } else { txt };
+                let label = txt.trim_start_matches("Tor").trim().to_string();
+                let label = if label.is_empty() { "…".to_string() } else { label };
+                let (ir, iresp) = ui.allocate_exact_size(vec2(18.0, 30.0), Sense::hover());
+                tor_icon(ui.painter(), ir.center(), 15.0, Color32::from_rgb(125, 70, 152));
+                iresp.on_hover_text(status.clone());
                 ui.add(egui::Label::new(egui::RichText::new(label).size(12.5).strong().color(col)).selectable(false)).on_hover_text(status.clone());
             }
             let bar_w = ui.available_width() - 158.0;
@@ -359,7 +417,8 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
             ui.painter().rect_filled(krect, 9.0, HOVER.linear_multiply(kh));
             let unlocked = vault.state == crate::vault::State::Unlocked;
             let kcol = if unlocked && !vault.matches.is_empty() { RED } else if unlocked { TEXT } else { SUBTLE };
-            ui.painter().text(krect.center() - vec2(6.0, 0.0), Align2::CENTER_CENTER, icon::KEY, icons(16.0), kcol);
+            let _ = kcol;
+            bitwarden_icon(ui.painter(), krect.center() - vec2(6.0, 0.0), 18.0, !unlocked);
             if unlocked && !vault.matches.is_empty() {
                 let badge = Rect::from_center_size(krect.center() + vec2(11.0, 7.0), vec2(18.0, 15.0));
                 ui.painter().rect_filled(badge, 7.0, RED);
@@ -509,7 +568,8 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
 fn vault_panel(ui: &mut egui::Ui, st: &mut UiState, vault: &crate::vault::Vault, url: &str, actions: &mut Vec<Action>) {
     use crate::vault::State;
     ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(icon::KEY).font(icons(18.0)).color(RED));
+        let (r, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+        bitwarden_icon(ui.painter(), r.center(), 20.0, false);
         ui.label(egui::RichText::new("Bitwarden").size(17.0).strong());
     });
     ui.add_space(8.0);
