@@ -34,6 +34,10 @@ pub struct Settings {
     pub fingerprint: bool,
     pub clean_links: bool,
     pub https_only: bool,
+    /// No JIT / WebAssembly: closes the most-attacked part of the JavaScript engine.
+    pub hardened: bool,
+    /// Sites where third-party script files are blocked.
+    pub no_3p_scripts: Vec<String>,
     // Privacy front-ends
     pub redirect_youtube: bool,
     pub redirect_reddit: bool,
@@ -62,6 +66,8 @@ impl Settings {
             fingerprint: true,
             clean_links: true,
             https_only: true,
+            hardened: false,
+            no_3p_scripts: Vec::new(),
             redirect_youtube: false,
             redirect_reddit: false,
             redirect_twitter: false,
@@ -80,6 +86,7 @@ impl Settings {
         self.fingerprint = true;
         self.clean_links = true;
         self.https_only = true;
+        self.hardened = true;
     }
 
     pub fn recommended_protection(&mut self) {
@@ -92,10 +99,11 @@ impl Settings {
         self.fingerprint = r.fingerprint;
         self.clean_links = r.clean_links;
         self.https_only = r.https_only;
+        self.hardened = r.hardened;
     }
 
     pub fn is_strict(&self) -> bool {
-        self.block_ads && self.cookie_banners && self.annoyances && self.social && self.malware && self.fingerprint && self.clean_links && self.https_only
+        self.block_ads && self.cookie_banners && self.annoyances && self.social && self.malware && self.fingerprint && self.clean_links && self.https_only && self.hardened
     }
 
     pub fn engine(&self) -> &'static SearchEngine {

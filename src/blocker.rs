@@ -65,7 +65,7 @@ impl Blocker {
 
     /// Loads cached lists (downloading missing/old ones), then builds the full engines.
     /// Runs on a background thread.
-    pub fn full(download: bool, settings: &crate::settings::Settings) -> Self {
+    pub fn full(download: bool, settings: &crate::settings::Settings, proxy: Option<&str>) -> Self {
         let dir = lists_dir();
         if let Some(d) = &dir {
             let _ = std::fs::create_dir_all(d);
@@ -78,7 +78,11 @@ impl Blocker {
                 .and_then(|t| SystemTime::now().duration_since(t).ok())
                 .is_some_and(|age| age < MAX_AGE);
             if !fresh && download {
-                let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(60)).build();
+                let mut builder = ureq::AgentBuilder::new().timeout(Duration::from_secs(90));
+                if let Some(p) = proxy.and_then(|p| ureq::Proxy::new(p).ok()) {
+                    builder = builder.proxy(p); // through Tor when Tor is on
+                }
+                let agent = builder.build();
                 if let Ok(resp) = agent.get(url).call() {
                     let mut body = String::new();
                     if std::io::Read::read_to_string(&mut resp.into_reader(), &mut body).is_ok() {

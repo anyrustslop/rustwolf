@@ -9,7 +9,7 @@ RustWolf is a privacy-first web browser **written in Rust**, built on the **Serv
 ## Download
 1. Download **`RustWolf-VERSION-win64.exe`** below.
 2. Run it (Windows 10/11, no install, no admin rights). The exe isn't code-signed, so Windows SmartScreen may warn you: click **More info → Run anyway**.
-3. Optional: check the download against **`SHA256SUMS.txt`** (in PowerShell: `Get-FileHash RustWolf-VERSION-win64.exe`).
+3. Optional: check the download against **`SHA256SUMS.txt`** (in PowerShell: `Get-FileHash RustWolf-VERSION-win64.exe`), or prove it was built by this repository's GitHub workflow with its signed provenance: `gh attestation verify RustWolf-VERSION-win64.exe --repo anyrustslop/rustwolf`.
 
 The full source code is attached as **Source code (zip / tar.gz)**.
 
@@ -21,7 +21,15 @@ The full source code is attached as **Source code (zip / tar.gz)**.
 - WebRTC, WebGL, WebGPU, location, notifications, Bluetooth and more are switched off; permission requests are denied.
 - Private by default: cookies, cache and history stay in memory and are forgotten when RustWolf closes. No telemetry.
 
-## New: first-run setup and Tor
+## New in 0.5
+- **Anti-ClickFix:** pages can't put commands (PowerShell, cmd, mshta, curl | sh…) in your clipboard; RustWolf blocks them and explains the scam. Your own Ctrl+C is never blocked.
+- **Hardened mode** (in Strict): JavaScript JIT and WebAssembly off, closing the most-attacked part of the engine.
+- **Per-site "block third-party scripts"** switch in the shield panel.
+- **Letterboxing:** page size rounded to 100 px steps so your window size can't identify you.
+- **Update check** with an Update button; update checks and filter-list downloads go through Tor when Tor is on.
+- **Signed build provenance** for every release, and a RustSec security audit of all dependencies on every build.
+
+## First-run setup and Tor
 - Pick your search engine (DuckDuckGo, Brave Search, Mojeek, Qwant, Kagi), your protection level (Recommended / Strict or each switch) and privacy tools on first start; change them anytime with the gear button.
 - **Connect through Tor:** RustWolf downloads the official Tor Expert Bundle (checksum-verified) and routes all traffic through it.
 - New blocking options: annoyances and social widgets (Fanboy lists).

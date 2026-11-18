@@ -41,7 +41,15 @@ RustWolf can't run browser extensions (Servo doesn't support them), so it talks 
 - A login is only offered when its saved address is on the same site as the page, and RustWolf checks again at the moment it fills (protects against phishing pages).
 - Your master password and session key are only passed to Bitwarden's tool in memory (never on a command line), are never saved, and closing RustWolf or pressing **Lock vault** locks the vault again.
 
+## Anti-ClickFix
+"ClickFix" scams show a fake CAPTCHA or error and secretly copy a malicious command, then tell you to press Win+R and paste. In RustWolf every clipboard write from a page goes through RustWolf's own Rust code first (Servo asks the browser), so pages can't get around it: anything that looks like a command (PowerShell, cmd, mshta, rundll32, `curl … | sh`, encoded payloads, "I am not a robot" decoys…) is blocked and a red warning explains the scam. Your own Ctrl+C is never blocked.
+
 ## Safety & speed
+- **Hardened mode** (part of Strict): the JavaScript JIT compilers and WebAssembly are off, closing the most-attacked part of the engine.
+- **Per-site "block third-party scripts"** switch in the shield panel (scripts written into the page itself still run).
+- **Letterboxing:** with fingerprint protection on, the page size is rounded to 100 px steps so your window size can't identify you.
+- **Update check:** RustWolf shows an Update button when a newer release exists; the check (and filter-list downloads) go through Tor when Tor is on.
+- **Verifiable releases:** every release has SHA-256 sums and signed build provenance (`gh attestation verify RustWolf-<version>-win64.exe --repo anyrustslop/rustwolf`), and every build runs a RustSec security audit of all dependencies.
 - **Each page runs in its own process**, so a bad page can't reach the browser.
 - **Memory guard:** a page process using more than 2 GB (less on PCs with under 12 GB of RAM) is stopped within a quarter of a second (only that page); Windows caps every RustWolf process too, so one heavy site can never freeze your PC.
 - RustWolf runs below normal priority, so your other apps always stay responsive. Background tabs are throttled.

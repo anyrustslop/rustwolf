@@ -218,6 +218,7 @@ fn protection(ui: &mut egui::Ui, st: &mut UiState) {
     toggle_row(ui, &mut d.fingerprint, "Fingerprint protection", "Makes your browser look like everyone else's so sites can't recognise you.");
     toggle_row(ui, &mut d.clean_links, "Clean tracking links", "Removes utm_, fbclid, gclid and other trackers from links you open.");
     toggle_row(ui, &mut d.https_only, "HTTPS-only", "Always use encrypted connections. (Applies fully after restarting RustWolf.)");
+    toggle_row(ui, &mut d.hardened, "Hardened mode", "Turns off the JavaScript JIT compiler and WebAssembly, where most browser exploits happen. Heavy sites get slower. (Applies after restarting RustWolf.)");
 }
 
 fn tools(ui: &mut egui::Ui, st: &mut UiState) {
@@ -253,6 +254,7 @@ fn summary(ui: &mut egui::Ui, st: &mut UiState) {
         (d.fingerprint, "Fingerprint protection"),
         (d.clean_links, "Tracking links cleaned"),
         (d.https_only, "HTTPS-only"),
+        (d.hardened, "Hardened mode (no JIT)"),
         (d.redirect_reddit, "Reddit → Redlib"),
         (d.redirect_youtube, "YouTube → Invidious"),
         (d.tor, "All traffic through Tor"),

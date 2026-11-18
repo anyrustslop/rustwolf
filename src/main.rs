@@ -60,6 +60,8 @@ pub enum Ev {
     /// CSS to add to a page (queued: Servo can't start a script from inside another script's answer).
     Css(WebView, String),
     Crashed(WebViewId),
+    /// A page tried to put a command in the clipboard (ClickFix scam).
+    ClickFix(WebViewId, String),
 }
 
 /// State Servo's callbacks can reach (they run on the main thread, during `spin_event_loop`).
@@ -72,6 +74,8 @@ pub struct Shared {
     pub settings: RefCell<settings::Settings>,
     /// The fingerprint-protection script (added/removed when the setting changes).
     pub fp_script: Rc<servo::UserScript>,
+    /// When the user last pressed Ctrl+C / Ctrl+X themselves (their own copies are never blocked).
+    pub user_copy: Cell<Option<std::time::Instant>>,
     /// Sites where the user turned the shield off.
     pub shields_off: RefCell<HashSet<String>>,
     pub rendering_context: Rc<OffscreenRenderingContext>,
@@ -96,6 +100,35 @@ impl Shared {
     }
     fn delegate(&self) -> Rc<dyn WebViewDelegate> {
         self.me.get().and_then(Weak::upgrade).expect("shared state alive")
+    }
+    fn clip(&self) -> Rc<dyn servo::ClipboardDelegate> {
+        self.me.get().and_then(Weak::upgrade).expect("shared state alive")
+    }
+}
+
+/// Every clipboard write from a page passes through here first (Servo asks the browser app),
+/// so a page script can't get around the ClickFix check.
+impl servo::ClipboardDelegate for Shared {
+    fn clear(&self, _webview: WebView) {
+        if let Ok(mut c) = arboard::Clipboard::new() {
+            let _ = c.clear();
+        }
+    }
+    fn get_text(&self, _webview: WebView, request: servo::StringRequest) {
+        match arboard::Clipboard::new().and_then(|mut c| c.get_text()) {
+            Ok(t) => request.success(t),
+            Err(e) => request.failure(e.to_string()),
+        }
+    }
+    fn set_text(&self, webview: WebView, new_contents: String) {
+        let user_copied = self.user_copy.get().is_some_and(|t| t.elapsed().as_millis() < 1500);
+        if !user_copied && guard::looks_like_command(&new_contents) {
+            self.push(Ev::ClickFix(webview.id(), new_contents));
+            return;
+        }
+        if let Ok(mut c) = arboard::Clipboard::new() {
+            let _ = c.set_text(new_contents);
+        }
     }
 }
 
@@ -128,6 +161,7 @@ impl WebViewDelegate for Shared {
         let webview = request
             .builder(self.rendering_context.clone())
             .user_content_manager(self.ucm.clone())
+            .clipboard_delegate(self.clip())
             .hidpi_scale_factor(Scale::new(self.scale.get()))
             .delegate(self.delegate())
             .build();
@@ -197,6 +231,12 @@ impl WebViewDelegate for Shared {
             "" | "none" => "xmlhttprequest",
             _ => "other",
         };
+        if kind == "script" && self.settings.borrow().no_3p_scripts.contains(&base_domain(&page_host)) {
+            let response = servo::WebResourceResponse::new(req.url.clone().into_url()).status_code(http::StatusCode::FORBIDDEN);
+            load.intercept(response).finish();
+            self.push(Ev::Blocked(webview.id(), host));
+            return;
+        }
         if self.blocker.borrow().should_block(&url, &page, kind) {
             let response = servo::WebResourceResponse::new(req.url.clone().into_url()).status_code(http::StatusCode::FORBIDDEN);
             load.intercept(response).finish();
@@ -207,14 +247,56 @@ impl WebViewDelegate for Shared {
 
 /// Loads the filter lists for these settings in the background: first from disk (instant),
 /// then downloads any that are missing or older than a week.
-fn load_lists(tx: std::sync::mpsc::Sender<blocker::Blocker>, proxy: EventLoopProxy<()>, settings: settings::Settings) {
+fn load_lists(tx: std::sync::mpsc::Sender<blocker::Blocker>, proxy: EventLoopProxy<()>, settings: settings::Settings, tor: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>) {
     std::thread::Builder::new()
         .name("filter-lists".into())
         .spawn(move || {
-            let _ = tx.send(blocker::Blocker::full(false, &settings));
+            let _ = tx.send(blocker::Blocker::full(false, &settings, None));
             let _ = proxy.send_event(());
             if blocker::Blocker::needs_update(&settings) {
-                let _ = tx.send(blocker::Blocker::full(true, &settings));
+                let via = wait_for_tor(&tor);
+                let _ = tx.send(blocker::Blocker::full(true, &settings, via.as_deref()));
+                let _ = proxy.send_event(());
+            }
+        })
+        .ok();
+}
+
+/// With Tor on, network requests RustWolf makes itself (filter lists, update check) wait for Tor
+/// and go through it, so they don't reveal your IP either. Returns the proxy to use.
+fn wait_for_tor(tor: &Option<std::sync::Arc<std::sync::atomic::AtomicU8>>) -> Option<String> {
+    let progress = tor.as_ref()?;
+    for _ in 0..240 {
+        match progress.load(std::sync::atomic::Ordering::Relaxed) {
+            100 => return Some(tor::proxy_uri()),
+            tor::FAILED => break,
+            _ => std::thread::sleep(std::time::Duration::from_millis(500)),
+        }
+    }
+    // Tor isn't working: better to skip the download than to leak the IP.
+    Some("http://127.0.0.1:9".into())
+}
+
+/// Checks GitHub for a newer RustWolf release (through Tor when Tor is on).
+fn check_for_update(tx: std::sync::mpsc::Sender<(String, String)>, proxy: EventLoopProxy<()>, tor: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>) {
+    std::thread::Builder::new()
+        .name("update-check".into())
+        .spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            let mut builder = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(60));
+            if let Some(p) = wait_for_tor(&tor).and_then(|p| ureq::Proxy::new(p).ok()) {
+                builder = builder.proxy(p);
+            }
+            let Ok(resp) = builder.build().get("https://api.github.com/repos/anyrustslop/rustwolf/releases/latest").set("User-Agent", "RustWolf").call() else { return };
+            let mut body = String::new();
+            if std::io::Read::read_to_string(&mut std::io::Read::take(resp.into_reader(), 2 * 1024 * 1024), &mut body).is_err() {
+                return;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return };
+            let (Some(tag), Some(url)) = (v["tag_name"].as_str(), v["html_url"].as_str()) else { return };
+            let num = |s: &str| -> Vec<u64> { s.trim_start_matches('v').split(|c: char| !c.is_ascii_digit()).filter_map(|p| p.parse().ok()).take(3).collect() };
+            if num(tag) > num(env!("CARGO_PKG_VERSION")) && url.starts_with("https://github.com/anyrustslop/rustwolf/") {
+                let _ = tx.send((tag.to_string(), url.to_string()));
                 let _ = proxy.send_event(());
             }
         })
@@ -289,6 +371,8 @@ pub struct Tab {
     pub status: Option<String>,
     /// Shown instead of the page (stopped page, dangerous site).
     pub notice: Option<Notice>,
+    /// Blocked clipboard command, shown in a red warning bar.
+    pub alert: Option<String>,
 }
 
 pub struct Notice {
@@ -300,7 +384,7 @@ pub struct Notice {
 
 impl Tab {
     fn blank() -> Self {
-        Self { webview: None, title: "New tab".into(), url: String::new(), loading: false, blocked: Default::default(), favicon: None, status: None, notice: None }
+        Self { webview: None, title: "New tab".into(), url: String::new(), loading: false, blocked: Default::default(), favicon: None, status: None, notice: None, alert: None }
     }
 }
 
@@ -318,6 +402,10 @@ pub enum Action {
     ToggleShield,
     VaultCheck,
     OpenSettings,
+    OpenInNewTab(String),
+    AlertDismiss,
+    AlertCopy,
+    ToggleScripts,
     Restart,
     ApplySettings(Box<settings::Settings>),
     VaultUnlock,
@@ -360,6 +448,7 @@ pub struct Browser {
     lists_rx: std::sync::mpsc::Receiver<blocker::Blocker>,
     guard_cooldown: std::time::Instant,
     lists_ready: bool,
+    update_rx: std::sync::mpsc::Receiver<(String, String)>,
     tor: Option<tor::Tor>,
     exit_requested: bool,
     lists_tx: std::sync::mpsc::Sender<blocker::Blocker>,
@@ -392,6 +481,20 @@ impl Browser {
         // Privacy lockdown of the engine itself.
         let user_settings = settings::Settings::load();
         prefs.network_enforce_tls_enabled = user_settings.https_only; // HTTPS-only (local addresses excepted)
+        // Pages may use copy buttons; every page-made copy goes through the ClickFix guard.
+        prefs.dom_async_clipboard_enabled = true;
+        prefs.dom_exec_command_enabled = true;
+        if user_settings.hardened {
+            // No JIT compilers and no WebAssembly: the JavaScript engine only interprets.
+            prefs.js_disable_jit = true;
+            prefs.js_baseline_jit_enabled = false;
+            prefs.js_ion_enabled = false;
+            prefs.js_asmjs_enabled = false;
+            prefs.js_wasm_enabled = false;
+            prefs.js_wasm_baseline_enabled = false;
+            prefs.js_wasm_ion_enabled = false;
+            prefs.js_native_regex_enabled = false;
+        }
         if user_settings.tor {
             // Every request goes through Tor's HTTP tunnel; Tor also resolves the hostnames.
             prefs.network_http_proxy_uri = tor::proxy_uri();
@@ -424,6 +527,7 @@ impl Browser {
             blocker: RefCell::new(blocker::Blocker::builtin()),
             ucm: Rc::new(servo::UserContentManager::new(&servo)),
             settings: RefCell::new(user_settings.clone()),
+            user_copy: Cell::new(None),
             fp_script: {
                 let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(7);
                 Rc::new(servo::UserScript::new(guard::fingerprint_script(seed), None))
@@ -444,7 +548,10 @@ impl Browser {
         // Full filter lists load in the background (first start downloads them).
         let tor = user_settings.tor.then(|| tor::Tor::start(proxy.clone()));
         let (lists_tx, lists_rx) = std::sync::mpsc::channel();
-        load_lists(lists_tx.clone(), proxy.clone(), user_settings.clone());
+        let tor_progress = tor.as_ref().map(|t| t.progress.clone());
+        load_lists(lists_tx.clone(), proxy.clone(), user_settings.clone(), tor_progress.clone());
+        let (update_tx, update_rx) = std::sync::mpsc::channel();
+        check_for_update(update_tx, proxy.clone(), tor_progress);
         let p3 = proxy.clone();
         let guard = guard::MemoryGuard::start(move || {
             let _ = p3.send_event(());
@@ -468,6 +575,7 @@ impl Browser {
             lists_rx,
             guard_cooldown: std::time::Instant::now(),
             lists_ready: false,
+            update_rx,
             tor,
             exit_requested: false,
             lists_tx,
@@ -496,6 +604,7 @@ impl Browser {
         WebViewBuilder::new(&self.servo, self.page_rc().clone())
             .url(url)
             .user_content_manager(self.shared.ucm.clone())
+            .clipboard_delegate(self.shared.clip())
             .hidpi_scale_factor(Scale::new(self.shared.scale.get()))
             .delegate(self.shared.delegate())
             .build()
@@ -650,6 +759,34 @@ impl Browser {
                     }
                 }
             }
+            Action::OpenInNewTab(url) => {
+                self.apply(Action::NewTab);
+                self.navigate(&url);
+            }
+            Action::AlertDismiss => {
+                self.tabs[self.active].alert = None;
+            }
+            Action::AlertCopy => {
+                if let Some(text) = self.tabs[self.active].alert.take() {
+                    if let Ok(mut c) = arboard::Clipboard::new() {
+                        let _ = c.set_text(text);
+                    }
+                }
+            }
+            Action::ToggleScripts => {
+                let site = base_domain(&host_of(&self.tabs[self.active].url));
+                if !site.is_empty() {
+                    let mut s = self.shared.settings.borrow().clone();
+                    if let Some(i) = s.no_3p_scripts.iter().position(|x| *x == site) {
+                        s.no_3p_scripts.remove(i);
+                    } else {
+                        s.no_3p_scripts.push(site);
+                    }
+                    s.save();
+                    *self.shared.settings.borrow_mut() = s;
+                    self.apply(Action::Reload);
+                }
+            }
             Action::OpenSettings => {
                 self.ui.draft = self.shared.settings.borrow().clone();
                 self.ui.setup_step = 1;
@@ -667,13 +804,13 @@ impl Browser {
                         self.shared.ucm.remove_script(self.shared.fp_script.clone());
                     }
                 }
-                if new.tor != old.tor {
+                if new.tor != old.tor || new.hardened != old.hardened {
                     self.ui.restart_needed = true;
                 }
                 let lists_changed = new.cookie_banners != old.cookie_banners || new.annoyances != old.annoyances || new.social != old.social;
                 *self.shared.settings.borrow_mut() = (*new).clone();
                 if lists_changed {
-                    load_lists(self.lists_tx.clone(), self.proxy.clone(), *new);
+                    load_lists(self.lists_tx.clone(), self.proxy.clone(), *new, self.tor.as_ref().map(|t| t.progress.clone()));
                 }
                 if self.tabs[self.active].webview.is_none() {
                     self.ui.focus_address = true;
@@ -798,6 +935,14 @@ impl Browser {
                     }
                 }
                 Ev::Css(w, css) => inject_css(&w, "__rw_hide2", &css),
+                Ev::ClickFix(id, text) => {
+                    if let Some(i) = self.tab_index(id) {
+                        self.tabs[i].alert = Some(text);
+                        if i != self.active {
+                            self.apply(Action::Select(i));
+                        }
+                    }
+                }
                 Ev::Crashed(id) => {
                     if let Some(i) = self.tab_index(id) {
                         let killed = self.guard.killed_mb.swap(0, std::sync::atomic::Ordering::Relaxed);
@@ -900,6 +1045,10 @@ impl Browser {
     fn background_checks(&mut self) {
         let url = self.tabs[self.active].url.clone();
         if self.vault.poll(&url) {
+            self.window.request_redraw();
+        }
+        if let Ok(update) = self.update_rx.try_recv() {
+            self.ui.update = Some(update);
             self.window.request_redraw();
         }
         while let Ok(full) = self.lists_rx.try_recv() {
@@ -1055,6 +1204,12 @@ impl Browser {
             }
             WindowEvent::ModifiersChanged(m) => self.modifiers = m.state(),
             WindowEvent::KeyboardInput { event: key, .. } => {
+                if key.state == ElementState::Pressed
+                    && self.modifiers.control_key()
+                    && matches!(key.physical_key, winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::KeyC | winit::keyboard::KeyCode::KeyX))
+                {
+                    self.shared.user_copy.set(Some(std::time::Instant::now()));
+                }
                 if self.shortcut(key) {
                     return;
                 }

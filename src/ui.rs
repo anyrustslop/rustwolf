@@ -44,6 +44,8 @@ pub struct UiState {
     /// Tor connection shown in the toolbar: (ready, failed, status text).
     pub tor: Option<(bool, bool, String)>,
     pub restart_needed: bool,
+    /// Newer release on GitHub: (version tag, release page).
+    pub update: Option<(String, String)>,
     pub vault_open: bool,
     /// Master password being typed (cleared as soon as it's handed to Bitwarden).
     pub vault_password: String,
@@ -55,7 +57,7 @@ pub struct UiState {
 
 impl UiState {
     pub fn new() -> Self {
-        Self { address: String::new(), editing: false, focus_address: false, blur: false, shield_open: false, setup_open: false, setup_step: 0, tor: None, restart_needed: false, draft: crate::settings::Settings::recommended(), vault_open: false, vault_password: String::new(), popup_open: false, typed: false, logo: None }
+        Self { address: String::new(), editing: false, focus_address: false, blur: false, shield_open: false, setup_open: false, setup_step: 0, tor: None, restart_needed: false, update: None, draft: crate::settings::Settings::recommended(), vault_open: false, vault_password: String::new(), popup_open: false, typed: false, logo: None }
     }
 }
 
@@ -277,6 +279,11 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
             // Address bar.
             let host = host_of(&tab.url);
             let shield_on = !shields_off.contains(&host);
+            if let Some((tag, url)) = &st.update {
+                if ui.add(egui::Button::new(egui::RichText::new(format!("Update to {tag}")).size(12.5).color(Color32::WHITE)).fill(RED).corner_radius(10.0).min_size(vec2(110.0, 30.0))).on_hover_text("A newer RustWolf with security fixes is available").clicked() {
+                    actions.push(Action::OpenInNewTab(url.clone()));
+                }
+            }
             // Restart button (after turning Tor on/off) and Tor status chip.
             if st.restart_needed {
                 if ui.add(egui::Button::new(egui::RichText::new("Restart to apply").size(12.5).color(Color32::WHITE)).fill(RED).corner_radius(10.0).min_size(vec2(120.0, 30.0))).clicked() {
@@ -426,6 +433,13 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
                 ui.add_space(12.0);
                 ui.label(egui::RichText::new(format!("{}", tab.blocked.total)).size(34.0).color(RED).strong());
                 ui.label(egui::RichText::new("trackers and ads blocked on this page").color(SUBTLE));
+                ui.add_space(8.0);
+                let site = crate::base_domain(&host);
+                let scripts_blocked = settings.no_3p_scripts.contains(&site);
+                let label = if scripts_blocked { "Third-party scripts: BLOCKED here" } else { "Third-party scripts: allowed here" };
+                if ui.add(egui::Button::new(label).fill(if scripts_blocked { RED.linear_multiply(0.35) } else { HOVER }).min_size(vec2(268.0, 30.0))).on_hover_text("Blocks script files from other sites (most tracking code). Scripts written into the page itself still run.").clicked() {
+                    actions.push(Action::ToggleScripts);
+                }
                 ui.add_space(10.0);
                 egui::ScrollArea::vertical().max_height(ui.available_height() - 90.0).show(ui, |ui| {
                     for (h, n) in &tab.blocked.by_host {
@@ -443,10 +457,41 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
         });
     }
 
+    // ---------- ClickFix warning bar
+    if let Some(cmd) = &tab.alert {
+        egui::Panel::top("clickfix").frame(Frame::new().fill(Color32::from_rgb(120, 20, 26)).inner_margin(Margin::symmetric(14, 10))).show_inside(root, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new(icon::SHIELD).font(icons(20.0)).color(Color32::WHITE));
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width() - 250.0);
+                    ui.label(egui::RichText::new("RustWolf blocked this site from copying a command to your clipboard").strong().color(Color32::WHITE));
+                    ui.label(egui::RichText::new("This is a known scam (\"ClickFix\"): fake CAPTCHA or error pages tell you to press Win+R and paste. Never paste website instructions into Win+R, PowerShell or a terminal.").size(12.5).color(Color32::from_rgb(255, 210, 210)));
+                    let preview: String = cmd.chars().take(140).collect();
+                    ui.label(egui::RichText::new(preview).monospace().size(11.5).color(Color32::from_rgb(255, 230, 230)));
+                });
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(egui::Button::new(egui::RichText::new("OK, keep me safe").color(Color32::WHITE)).fill(RED).min_size(vec2(130.0, 30.0))).clicked() {
+                        actions.push(Action::AlertDismiss);
+                    }
+                    if ui.add(egui::Button::new(egui::RichText::new("Copy anyway").size(12.0)).frame(false)).on_hover_text("Only if you trust this site and know what the command does").clicked() {
+                        actions.push(Action::AlertCopy);
+                    }
+                });
+            });
+        });
+    }
+
     // ---------- page area / new-tab page
     let mut page = Rect::NOTHING;
     egui::CentralPanel::default().frame(Frame::new().fill(BG)).show_inside(root, |ui| {
         page = ui.max_rect();
+        // Letterboxing: the page gets a size rounded to 100 px steps, so your exact window size
+        // can't be used to recognise you (like Tor Browser / Mullvad Browser).
+        if settings.fingerprint && tab.webview.is_some() {
+            let w = ((page.width() / 100.0).floor() * 100.0).max(200.0).min(page.width());
+            let h = ((page.height() / 100.0).floor() * 100.0).max(200.0).min(page.height());
+            page = Rect::from_center_size(page.center(), vec2(w, h));
+        }
         if let (None, Some(n)) = (&tab.webview, &tab.notice) {
             notice_page(ui, n, actions);
         } else if tab.webview.is_none() {
