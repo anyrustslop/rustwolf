@@ -1,0 +1,47 @@
+name: Build RustWolf
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    - cron: "0 5 * * 1"   # weekly: pick up Servo and security fixes in dependencies
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Update dependencies (scheduled runs)
+        if: github.event_name == 'schedule'
+        run: cargo update
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: rustwolf-${{ hashFiles('Cargo.lock') }}
+          restore-keys: rustwolf-
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target/release/RustWolf.exe dist/RustWolf.exe
+          Compress-Archive -Path dist/RustWolf.exe -DestinationPath RustWolf-win64.zip -Force
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "build-" + (Get-Date -Format "yyyy.MM.dd-HHmm")
+          gh release create $tag RustWolf-win64.zip --title "RustWolf $tag" --notes "RustWolf (Rust + Servo) built automatically from commit $env:GITHUB_SHA. Download RustWolf-win64.zip, unzip, run RustWolf.exe."

@@ -1,0 +1,30 @@
+[package]
+name = "rustwolf"
+version = "0.2.0"
+edition = "2021"
+description = "RustWolf - a privacy-first web browser written in Rust, on the Servo engine"
+license = "MPL-2.0"
+publish = false
+
+[[bin]]
+name = "RustWolf"
+path = "src/main.rs"
+
+[dependencies]
+servo = "0.8.0"
+winit = "0.30.13"
+egui = "0.34.3"
+egui-winit = { version = "0.34.3", default-features = false, features = ["clipboard", "links"] }
+egui_glow = { version = "0.34.3", features = ["winit"] }
+glow = "0.17"
+euclid = "0.22"
+url = "2.5"
+http = "1"
+adblock = { version = "0.13", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+strip = true
