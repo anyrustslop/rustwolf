@@ -14,6 +14,14 @@ A privacy-first web browser **written in Rust**, built on **[Servo](https://serv
 Get **RustWolf-<version>-win64.exe** from the [latest release](../../releases/latest) and run it (Windows 10/11, no install needed; the exe isn't code-signed, so SmartScreen may ask you to click **More info → Run anyway**). Each release also has `SHA256SUMS.txt` to verify the download, and the full source code.
 Releases are built by [GitHub Actions](.github/workflows/build.yml) for every version tag, plus a weekly build that pulls in Servo and dependency (security) fixes.
 
+## First-run setup
+The first time you open RustWolf it asks how you want to be protected (change it anytime with the gear button):
+- **Search engine:** DuckDuckGo, Brave Search, Mojeek, Qwant or Kagi. No Google, and none of them sell your data.
+- **Protection:** Recommended or Strict, or pick each one: ads & trackers, cookie banners, annoyances (newsletter pop-ups, chat bubbles), social widgets, malware & phishing shield, fingerprint protection, tracking-link cleaning, HTTPS-only.
+- **Privacy tools:**
+  - **Connect through Tor (on by default):** hides your IP address and location from every site and opens `.onion` sites. RustWolf downloads the official Tor Expert Bundle from torproject.org, refuses it unless it matches the Tor Project's published SHA-256, runs it in the background and sends every request (including DNS lookups) through it, with a separate Tor route per website. Tor stops when RustWolf closes. It hides who you are on the network, but RustWolf is not as anonymous as Tor Browser.
+  - **Private front-ends:** Reddit → Redlib, YouTube → Invidious. These are free community services and can be slow or offline.
+
 ## Privacy
 - **Ad, tracker and cookie-banner blocking** with Brave's Rust ad-block engine ([`adblock`](https://crates.io/crates/adblock)) and EasyList, EasyPrivacy and Fanboy's cookie list (downloaded on first start, refreshed weekly), plus RustWolf's own list. Empty ad boxes are hidden too (cosmetic filtering). Per-site shield switch with a live "blocked" counter and the list of blocked domains. Add your own lists in `%APPDATA%\RustWolf\filters.txt`.
 - **Malware & phishing shield:** known dangerous sites (URLhaus and phishing lists) are stopped before any connection is made, with a warning page.

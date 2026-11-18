@@ -37,6 +37,13 @@ pub struct UiState {
     pub focus_address: bool,
     pub blur: bool,
     pub shield_open: bool,
+    /// First-run setup / Settings screen.
+    pub setup_open: bool,
+    pub setup_step: usize,
+    pub draft: crate::settings::Settings,
+    /// Tor connection shown in the toolbar: (ready, failed, status text).
+    pub tor: Option<(bool, bool, String)>,
+    pub restart_needed: bool,
     pub vault_open: bool,
     /// Master password being typed (cleared as soon as it's handed to Bitwarden).
     pub vault_password: String,
@@ -48,7 +55,7 @@ pub struct UiState {
 
 impl UiState {
     pub fn new() -> Self {
-        Self { address: String::new(), editing: false, focus_address: false, blur: false, shield_open: false, vault_open: false, vault_password: String::new(), popup_open: false, typed: false, logo: None }
+        Self { address: String::new(), editing: false, focus_address: false, blur: false, shield_open: false, setup_open: false, setup_step: 0, tor: None, restart_needed: false, draft: crate::settings::Settings::recommended(), vault_open: false, vault_password: String::new(), popup_open: false, typed: false, logo: None }
     }
 }
 
@@ -104,7 +111,7 @@ fn icons(size: f32) -> FontId {
 }
 
 /// Turns what the user typed into a URL: an address, or a private DuckDuckGo search.
-pub fn resolve_input(input: &str) -> Option<url::Url> {
+pub fn resolve_input(input: &str, settings: &crate::settings::Settings) -> Option<url::Url> {
     let s = input.trim();
     if s.is_empty() {
         return None;
@@ -122,7 +129,7 @@ pub fn resolve_input(input: &str) -> Option<url::Url> {
             return Some(u);
         }
     }
-    url::Url::parse_with_params("https://duckduckgo.com/", &[("q", s)]).ok()
+    settings.search_url(s)
 }
 
 pub fn to_color_image(image: &servo::Image) -> egui::ColorImage {
@@ -141,6 +148,15 @@ pub fn to_color_image(image: &servo::Image) -> egui::ColorImage {
             egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba)
         }
     }
+}
+
+pub fn lerp_color(a: Color32, b: Color32, t: f32) -> Color32 {
+    let l = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t.clamp(0.0, 1.0)) as u8;
+    Color32::from_rgba_unmultiplied(l(a.r(), b.r()), l(a.g(), b.g()), l(a.b(), b.b()), l(a.a(), b.a()))
+}
+
+pub fn logo_texture(ui: &egui::Ui, state: &mut UiState) -> egui::TextureId {
+    logo(ui, state)
 }
 
 fn logo(ui: &egui::Ui, state: &mut UiState) -> egui::TextureId {
@@ -165,7 +181,11 @@ fn icon_button(ui: &mut egui::Ui, glyph: &str, enabled: bool, tip: &str) -> egui
 }
 
 /// Draws the whole interface and returns the rectangle left for the web page (in points).
-pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, blocker: &Blocker, shields_off: &HashSet<String>, vault: &crate::vault::Vault, actions: &mut Vec<Action>) -> Rect {
+pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, blocker: &Blocker, shields_off: &HashSet<String>, vault: &crate::vault::Vault, settings: &crate::settings::Settings, actions: &mut Vec<Action>) -> Rect {
+    if st.setup_open {
+        crate::setup_ui::wizard(root, st, actions);
+        return Rect::NOTHING;
+    }
     let tab = &tabs[active];
     if !st.editing {
         st.address = tab.url.clone();
@@ -257,7 +277,24 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
             // Address bar.
             let host = host_of(&tab.url);
             let shield_on = !shields_off.contains(&host);
-            let bar_w = ui.available_width() - 112.0;
+            // Restart button (after turning Tor on/off) and Tor status chip.
+            if st.restart_needed {
+                if ui.add(egui::Button::new(egui::RichText::new("Restart to apply").size(12.5).color(Color32::WHITE)).fill(RED).corner_radius(10.0).min_size(vec2(120.0, 30.0))).clicked() {
+                    actions.push(Action::Restart);
+                }
+            }
+            if let Some((ready, failed, status)) = &st.tor {
+                let (txt, col) = if *ready {
+                    ("Tor on".to_string(), Color32::from_rgb(170, 120, 255))
+                } else if *failed {
+                    ("Tor failed".to_string(), RED_HI)
+                } else {
+                    (status.trim_start_matches("Connecting to Tor… ").replace("Connecting to the Tor network…", "Tor…").replace("Downloading Tor from torproject.org…", "Tor ↓"), SUBTLE)
+                };
+                let label = if txt.ends_with('%') { format!("Tor {txt}") } else { txt };
+                ui.add(egui::Label::new(egui::RichText::new(label).size(12.5).strong().color(col)).selectable(false)).on_hover_text(status.clone());
+            }
+            let bar_w = ui.available_width() - 158.0;
             let (bar, _) = ui.allocate_exact_size(vec2(bar_w, 34.0), Sense::hover());
             let focused_id = egui::Id::new("address");
             let has_focus = ui.memory(|m| m.has_focus(focused_id));
@@ -271,7 +308,7 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
                         TextEdit::singleline(&mut st.address)
                             .id(focused_id)
                             .frame(Frame::NONE)
-                            .hint_text("Search with DuckDuckGo or type an address")
+                            .hint_text(format!("Search with {} or type an address", settings.engine().name))
                             .font(FontId::proportional(14.0))
                             .desired_width(edit_rect.width()),
                     )
@@ -344,6 +381,9 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
             if sresp.on_hover_text("Tracker shield").clicked() {
                 st.shield_open = !st.shield_open;
                 st.vault_open = false;
+            }
+            if icon_button(ui, "\u{E713}", true, "Settings").clicked() {
+                actions.push(Action::OpenSettings);
             }
         });
     });

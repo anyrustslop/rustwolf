@@ -10,7 +10,19 @@ const BLOCK_LISTS: &[(&str, &str)] = &[
     ("easylist.txt", "https://easylist.to/easylist/easylist.txt"),
     ("easyprivacy.txt", "https://easylist.to/easylist/easyprivacy.txt"),
     ("cookiemonster.txt", "https://secure.fanboy.co.nz/fanboy-cookiemonster.txt"),
+    ("annoyance.txt", "https://secure.fanboy.co.nz/fanboy-annoyance.txt"),
+    ("social.txt", "https://easylist.to/easylist/fanboy-social.txt"),
 ];
+
+/// Which lists the user's settings ask for.
+fn wanted(name: &str, s: &crate::settings::Settings) -> bool {
+    match name {
+        "cookiemonster.txt" => s.cookie_banners,
+        "annoyance.txt" => s.annoyances,
+        "social.txt" => s.social,
+        _ => true,
+    }
+}
 /// Known malware and phishing sites: opening one shows a warning instead of the page.
 const DANGER_LISTS: &[(&str, &str)] = &[
     ("urlhaus-domains.txt", "https://malware-filter.gitlab.io/malware-filter/urlhaus-filter-agh-online.txt"),
@@ -53,7 +65,7 @@ impl Blocker {
 
     /// Loads cached lists (downloading missing/old ones), then builds the full engines.
     /// Runs on a background thread.
-    pub fn full(download: bool) -> Self {
+    pub fn full(download: bool, settings: &crate::settings::Settings) -> Self {
         let dir = lists_dir();
         if let Some(d) = &dir {
             let _ = std::fs::create_dir_all(d);
@@ -83,12 +95,17 @@ impl Blocker {
         let mut text = Self::builtin_text();
         let mut lists = vec!["RustWolf built-in"];
         for (name, url) in BLOCK_LISTS {
+            if !wanted(name, settings) {
+                continue;
+            }
             if let Some(t) = fetch(name, url) {
                 text.push('\n');
                 text.push_str(&t);
                 lists.push(match *name {
                     "easylist.txt" => "EasyList",
                     "easyprivacy.txt" => "EasyPrivacy",
+                    "annoyance.txt" => "Annoyances (Fanboy)",
+                    "social.txt" => "Social widgets (Fanboy)",
                     _ => "Cookie banners (Fanboy)",
                 });
             }
@@ -107,9 +124,9 @@ impl Blocker {
     }
 
     /// True when some list is missing or older than a week (needs a download).
-    pub fn needs_update() -> bool {
+    pub fn needs_update(settings: &crate::settings::Settings) -> bool {
         let Some(dir) = lists_dir() else { return false };
-        BLOCK_LISTS.iter().chain(DANGER_LISTS).any(|(name, _)| {
+        BLOCK_LISTS.iter().filter(|(n, _)| wanted(n, settings)).chain(DANGER_LISTS).any(|(name, _)| {
             std::fs::metadata(dir.join(name))
                 .and_then(|m| m.modified())
                 .ok()

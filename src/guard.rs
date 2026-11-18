@@ -106,7 +106,7 @@ fn own_ram_mb() -> u64 {
 pub fn hard_memory_cap() {
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
-        JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+        JOB_OBJECT_LIMIT_JOB_MEMORY, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY, JOB_OBJECT_LIMIT_BREAKAWAY_OK,
     };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     unsafe {
@@ -117,7 +117,9 @@ pub fn hard_memory_cap() {
         let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
         // Each process (the browser and every page process) gets at most 20% of the RAM,
         // and all of RustWolf together at most 40%.
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_JOB_MEMORY | JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        // BREAKAWAY_OK lets "Restart RustWolf" start the new copy outside this job.
+        info.BasicLimitInformation.LimitFlags =
+            JOB_OBJECT_LIMIT_JOB_MEMORY | JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK;
         info.ProcessMemoryLimit = (total_ram_mb() * 20 / 100 * 1024 * 1024) as usize;
         info.JobMemoryLimit = (total_ram_mb() * 40 / 100 * 1024 * 1024) as usize;
         SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info as *const _ as *const _, std::mem::size_of_val(&info) as u32);

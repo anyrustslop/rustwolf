@@ -12,6 +12,9 @@ mod guard;
 mod keyutils;
 #[allow(dead_code)]
 mod logo;
+mod settings;
+mod tor;
+mod setup_ui;
 mod ui;
 mod vault;
 
@@ -66,6 +69,9 @@ pub struct Shared {
     pub events: RefCell<Vec<Ev>>,
     pub blocker: RefCell<blocker::Blocker>,
     pub ucm: Rc<servo::UserContentManager>,
+    pub settings: RefCell<settings::Settings>,
+    /// The fingerprint-protection script (added/removed when the setting changes).
+    pub fp_script: Rc<servo::UserScript>,
     /// Sites where the user turned the shield off.
     pub shields_off: RefCell<HashSet<String>>,
     pub rendering_context: Rc<OffscreenRenderingContext>,
@@ -137,19 +143,25 @@ impl WebViewDelegate for Shared {
         let host = host_of(url.as_str());
         let protected = !self.shields_off.borrow().contains(&host);
         let mut changed = false;
-        if protected && self.blocker.borrow().is_dangerous(url.as_str()) {
+        let s = self.settings.borrow().clone();
+        if protected && s.malware && self.blocker.borrow().is_dangerous(url.as_str()) {
             request.deny();
             self.push(Ev::Danger(webview.id(), url));
             return;
         }
-        if protected {
+        if protected && s.clean_links {
             if let Some(clean) = blocker::clean_url(&url) {
                 url = clean;
                 changed = true;
             }
         }
-        let local = host == "localhost" || host.starts_with("127.") || host.ends_with(".local") || host.starts_with("192.168.") || host.starts_with("10.");
-        if url.scheme() == "http" && !local && url.set_scheme("https").is_ok() {
+        if let Some(front_end) = s.redirect(&url) {
+            url = front_end;
+            changed = true;
+        }
+        // .onion sites are end-to-end encrypted by Tor itself and usually use plain http.
+        let local = host == "localhost" || host.starts_with("127.") || host.ends_with(".local") || host.starts_with("192.168.") || host.starts_with("10.") || host.ends_with(".onion");
+        if s.https_only && url.scheme() == "http" && !local && url.set_scheme("https").is_ok() {
             changed = true;
         }
         if changed {
@@ -164,7 +176,7 @@ impl WebViewDelegate for Shared {
         let url = req.url.as_str().to_string();
         let page = webview.url().map(|u| u.to_string()).unwrap_or_default();
         let page_host = host_of(&page);
-        if self.shields_off.borrow().contains(&page_host) {
+        if !self.settings.borrow().block_ads || self.shields_off.borrow().contains(&page_host) {
             return;
         }
         if req.is_for_main_frame {
@@ -193,10 +205,26 @@ impl WebViewDelegate for Shared {
     }
 }
 
+/// Loads the filter lists for these settings in the background: first from disk (instant),
+/// then downloads any that are missing or older than a week.
+fn load_lists(tx: std::sync::mpsc::Sender<blocker::Blocker>, proxy: EventLoopProxy<()>, settings: settings::Settings) {
+    std::thread::Builder::new()
+        .name("filter-lists".into())
+        .spawn(move || {
+            let _ = tx.send(blocker::Blocker::full(false, &settings));
+            let _ = proxy.send_event(());
+            if blocker::Blocker::needs_update(&settings) {
+                let _ = tx.send(blocker::Blocker::full(true, &settings));
+                let _ = proxy.send_event(());
+            }
+        })
+        .ok();
+}
+
 /// Cosmetic filtering: hides ad boxes and banners left empty by blocked requests.
 fn hide_ad_boxes(shared: Rc<Shared>, webview: WebView) {
     let Some(url) = webview.url().map(|u| u.to_string()) else { return };
-    if shared.shields_off.borrow().contains(&host_of(&url)) || !url.starts_with("http") {
+    if !shared.settings.borrow().block_ads || shared.shields_off.borrow().contains(&host_of(&url)) || !url.starts_with("http") {
         return;
     }
     let (css, generichide, exceptions) = shared.blocker.borrow().cosmetic_css(&url);
@@ -289,6 +317,9 @@ pub enum Action {
     Home,
     ToggleShield,
     VaultCheck,
+    OpenSettings,
+    Restart,
+    ApplySettings(Box<settings::Settings>),
     VaultUnlock,
     VaultLock,
     VaultFill(usize),
@@ -329,6 +360,10 @@ pub struct Browser {
     lists_rx: std::sync::mpsc::Receiver<blocker::Blocker>,
     guard_cooldown: std::time::Instant,
     lists_ready: bool,
+    tor: Option<tor::Tor>,
+    exit_requested: bool,
+    lists_tx: std::sync::mpsc::Sender<blocker::Blocker>,
+    proxy: EventLoopProxy<()>,
     vault: vault::Vault,
     /// Address given on the command line, opened once the protection lists are loaded.
     pending_url: Option<String>,
@@ -355,7 +390,14 @@ impl Browser {
         prefs.layout_threads = 2;
         prefs.js_mem_max = 1536; // MB of JavaScript heap per page
         // Privacy lockdown of the engine itself.
-        prefs.network_enforce_tls_enabled = true; // HTTPS-only (local addresses excepted)
+        let user_settings = settings::Settings::load();
+        prefs.network_enforce_tls_enabled = user_settings.https_only; // HTTPS-only (local addresses excepted)
+        if user_settings.tor {
+            // Every request goes through Tor's HTTP tunnel; Tor also resolves the hostnames.
+            prefs.network_http_proxy_uri = tor::proxy_uri();
+            prefs.network_https_proxy_uri = tor::proxy_uri();
+            prefs.network_http_no_proxy = "localhost,127.0.0.1".into();
+        }
         prefs.network_http_disk_cache = String::new(); // nothing cached on disk
         prefs.user_agent = guard::USER_AGENT.into(); // blend in with the most common browser
         prefs.intl_locale_override = "en-US".into();
@@ -380,37 +422,29 @@ impl Browser {
             window: window.clone(),
             events: RefCell::new(Vec::new()),
             blocker: RefCell::new(blocker::Blocker::builtin()),
-            ucm: {
-                let ucm = Rc::new(servo::UserContentManager::new(&servo));
+            ucm: Rc::new(servo::UserContentManager::new(&servo)),
+            settings: RefCell::new(user_settings.clone()),
+            fp_script: {
                 let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(7);
-                ucm.add_script(Rc::new(servo::UserScript::new(guard::fingerprint_script(seed), None)));
-                ucm
+                Rc::new(servo::UserScript::new(guard::fingerprint_script(seed), None))
             },
             shields_off: RefCell::new(HashSet::new()),
             rendering_context: page_rc.clone(),
             scale: Cell::new(window.scale_factor() as f32),
         });
         let _ = shared.me.set(Rc::downgrade(&shared));
+        if user_settings.fingerprint {
+            shared.ucm.add_script(shared.fp_script.clone());
+        }
 
         page_rc.make_current().expect("make current");
         let egui = EguiGlow::new(event_loop, page_rc.glow_gl_api(), None, None, false);
         ui::setup(&egui.egui_ctx);
 
         // Full filter lists load in the background (first start downloads them).
+        let tor = user_settings.tor.then(|| tor::Tor::start(proxy.clone()));
         let (lists_tx, lists_rx) = std::sync::mpsc::channel();
-        let p2 = proxy.clone();
-        std::thread::Builder::new()
-            .name("filter-lists".into())
-            .spawn(move || {
-                // 1) instantly from the lists saved on disk, 2) then download any that are missing or old.
-                let _ = lists_tx.send(blocker::Blocker::full(false));
-                let _ = p2.send_event(());
-                if blocker::Blocker::needs_update() {
-                    let _ = lists_tx.send(blocker::Blocker::full(true));
-                    let _ = p2.send_event(());
-                }
-            })
-            .ok();
+        load_lists(lists_tx.clone(), proxy.clone(), user_settings.clone());
         let p3 = proxy.clone();
         let guard = guard::MemoryGuard::start(move || {
             let _ = p3.send_event(());
@@ -434,10 +468,19 @@ impl Browser {
             lists_rx,
             guard_cooldown: std::time::Instant::now(),
             lists_ready: false,
+            tor,
+            exit_requested: false,
+            lists_tx,
+            proxy: proxy.clone(),
             vault: vault::Vault::new(proxy.clone()),
             pending_url: None,
         };
         b.ui.focus_address = true;
+        if !user_settings.setup_done {
+            b.ui.setup_open = true;
+            b.ui.setup_step = 0;
+            b.ui.draft = user_settings.clone();
+        }
         if let Some(arg) = std::env::args().nth(1) {
             b.pending_url = Some(arg);
             b.ui.focus_address = false;
@@ -463,13 +506,19 @@ impl Browser {
     }
 
     fn navigate(&mut self, input: &str) {
-        let Some(mut url) = ui::resolve_input(input) else { return };
+        let s = self.shared.settings.borrow().clone();
+        let Some(mut url) = ui::resolve_input(input, &s) else { return };
+        if let Some(front_end) = s.redirect(&url) {
+            url = front_end;
+        }
         let protected = !self.shared.shields_off.borrow().contains(&host_of(url.as_str()));
         if protected {
-            if let Some(clean) = blocker::clean_url(&url) {
-                url = clean;
+            if s.clean_links {
+                if let Some(clean) = blocker::clean_url(&url) {
+                    url = clean;
+                }
             }
-            if self.shared.blocker.borrow().is_dangerous(url.as_str()) {
+            if s.malware && self.shared.blocker.borrow().is_dangerous(url.as_str()) {
                 let t = &mut self.tabs[self.active];
                 t.webview = None;
                 t.url = url.to_string();
@@ -591,6 +640,45 @@ impl Browser {
                 self.page_focused = false;
             }
             Action::VaultCheck => self.vault.check_status(),
+            Action::Restart => {
+                // Start a fresh RustWolf outside our memory-limit job (so it isn't closed with us), then quit.
+                if let Ok(exe) = std::env::current_exe() {
+                    use std::os::windows::process::CommandExt;
+                    const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+                    if std::process::Command::new(exe).creation_flags(CREATE_BREAKAWAY_FROM_JOB).spawn().is_ok() {
+                        self.exit_requested = true;
+                    }
+                }
+            }
+            Action::OpenSettings => {
+                self.ui.draft = self.shared.settings.borrow().clone();
+                self.ui.setup_step = 1;
+                self.ui.setup_open = true;
+                self.ui.shield_open = false;
+                self.ui.vault_open = false;
+            }
+            Action::ApplySettings(new) => {
+                let old = self.shared.settings.borrow().clone();
+                new.save();
+                if new.fingerprint != old.fingerprint {
+                    if new.fingerprint {
+                        self.shared.ucm.add_script(self.shared.fp_script.clone());
+                    } else {
+                        self.shared.ucm.remove_script(self.shared.fp_script.clone());
+                    }
+                }
+                if new.tor != old.tor {
+                    self.ui.restart_needed = true;
+                }
+                let lists_changed = new.cookie_banners != old.cookie_banners || new.annoyances != old.annoyances || new.social != old.social;
+                *self.shared.settings.borrow_mut() = (*new).clone();
+                if lists_changed {
+                    load_lists(self.lists_tx.clone(), self.proxy.clone(), *new);
+                }
+                if self.tabs[self.active].webview.is_none() {
+                    self.ui.focus_address = true;
+                }
+            }
             Action::VaultUnlock => {
                 let pw = std::mem::take(&mut self.ui.vault_password);
                 self.vault.unlock(pw);
@@ -762,12 +850,13 @@ impl Browser {
             let Browser { egui, ui, tabs, active: active_i, shared, window, vault, .. } = self;
             let ctx_scale = scale;
             egui.run(window, |ctx| {
-                let page = ui::draw(ctx, ui, tabs, *active_i, &shared.blocker.borrow(), &shared.shields_off.borrow(), vault, &mut actions);
+                let page = ui::draw(ctx, ui, tabs, *active_i, &shared.blocker.borrow(), &shared.shields_off.borrow(), vault, &shared.settings.borrow(), &mut actions);
+                let page = if page.is_positive() && page.is_finite() { page } else { egui::Rect::from_min_size(egui::Pos2::ZERO, egui::Vec2::ZERO) };
                 page_rect_px = Rect::new(
                     Point2D::new(page.min.x * ctx_scale, page.min.y * ctx_scale),
                     Size2D::new(page.width() * ctx_scale, page.height() * ctx_scale),
                 );
-                if let Some(w) = &active {
+                if let Some(w) = active.as_ref().filter(|_| page.width() > 1.0 && page.height() > 1.0) {
                     let size = PhysicalSize::new(page_rect_px.size.width.round() as u32, page_rect_px.size.height.round() as u32);
                     if size.width > 0 && size.height > 0 && w.size() != Size2D::new(size.width as f32, size.height as f32) {
                         w.resize(size);
@@ -818,7 +907,15 @@ impl Browser {
             self.lists_ready = true;
             self.window.request_redraw();
         }
-        if self.lists_ready {
+        if let Some(t) = &self.tor {
+            let st = (t.ready(), t.failed(), t.status());
+            if self.ui.tor.as_ref() != Some(&st) {
+                self.ui.tor = Some(st);
+                self.window.request_redraw();
+            }
+        }
+        let tor_settled = self.tor.as_ref().is_none_or(|t| t.ready() || t.failed());
+        if self.lists_ready && tor_settled {
             if let Some(url) = self.pending_url.take() {
                 self.navigate(&url);
             }
@@ -918,6 +1015,10 @@ impl Browser {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
+        if self.exit_requested {
+            event_loop.exit();
+            return;
+        }
         if matches!(event, WindowEvent::MouseInput { .. } | WindowEvent::MouseWheel { .. }) {
             if let Some(pos) = self.os_cursor_position() {
                 if pos != self.mouse_window {

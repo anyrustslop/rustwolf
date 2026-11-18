@@ -21,6 +21,11 @@ The full source code is attached as **Source code (zip / tar.gz)**.
 - WebRTC, WebGL, WebGPU, location, notifications, Bluetooth and more are switched off; permission requests are denied.
 - Private by default: cookies, cache and history stay in memory and are forgotten when RustWolf closes. No telemetry.
 
+## New: first-run setup and Tor
+- Pick your search engine (DuckDuckGo, Brave Search, Mojeek, Qwant, Kagi), your protection level (Recommended / Strict or each switch) and privacy tools on first start; change them anytime with the gear button.
+- **Connect through Tor:** RustWolf downloads the official Tor Expert Bundle (checksum-verified) and routes all traffic through it.
+- New blocking options: annoyances and social widgets (Fanboy lists).
+
 ## Bitwarden autofill
 Click the key button next to the shield to unlock your Bitwarden vault (through Bitwarden's official CLI: `winget install Bitwarden.CLI`, then `bw login` once) and fill saved logins on matching sites.
 
