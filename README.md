@@ -5,8 +5,8 @@ A privacy-first web browser **written in Rust**, built on **[Servo](https://serv
 ![RustWolf](screenshots/guardian.png)
 
 ## Download
-Get **RustWolf-win64.zip** from the [latest release](../../releases/latest), unzip it and run `RustWolf.exe` (Windows 10/11, no install needed).
-New builds are made automatically by [GitHub Actions](.github/workflows/build.yml) on every change and every week, so Servo and dependency fixes keep arriving.
+Get **RustWolf-<version>-win64.zip** from the [latest release](../../releases/latest), unzip it and run `RustWolf.exe` (Windows 10/11, no install needed). Each release also has `SHA256SUMS.txt` to verify the download, and the full source code.
+Releases are built by [GitHub Actions](.github/workflows/build.yml) for every version tag, plus a weekly build that pulls in Servo and dependency (security) fixes.
 
 ## Privacy
 - **Ad, tracker and cookie-banner blocking** with Brave's Rust ad-block engine ([`adblock`](https://crates.io/crates/adblock)) and EasyList, EasyPrivacy and Fanboy's cookie list (downloaded on first start, refreshed weekly), plus RustWolf's own list. Empty ad boxes are hidden too (cosmetic filtering). Per-site shield switch with a live "blocked" counter and the list of blocked domains. Add your own lists in `%APPDATA%\RustWolf\filters.txt`.

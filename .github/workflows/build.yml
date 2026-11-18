@@ -1,14 +1,22 @@
 name: Build RustWolf
 
+# - push to main: build check only
+# - tag vX.Y.Z:  build + versioned release (program zip, checksums, release notes, source code)
+# - weekly:      update dependencies (Servo + security fixes), build + release
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
   schedule:
-    - cron: "0 5 * * 1"   # weekly: pick up Servo and security fixes in dependencies
+    - cron: "0 5 * * 1"
 
 permissions:
   contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -17,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Update dependencies (scheduled runs)
+      - name: Update dependencies (weekly runs)
         if: github.event_name == 'schedule'
         run: cargo update
 
@@ -31,17 +39,35 @@ jobs:
           restore-keys: rustwolf-
 
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release
+
+      - name: Version
+        id: v
+        shell: pwsh
+        run: |
+          $base = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ($env:GITHUB_REF -like "refs/tags/v*") { $ver = $env:GITHUB_REF_NAME.TrimStart('v'); $tag = $env:GITHUB_REF_NAME }
+          else { $ver = "$base-weekly." + (Get-Date -Format "yyyyMMdd"); $tag = "v$ver" }
+          "version=$ver" >> $env:GITHUB_OUTPUT
+          "tag=$tag" >> $env:GITHUB_OUTPUT
 
       - name: Package
+        shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Copy-Item target/release/RustWolf.exe dist/RustWolf.exe
-          Compress-Archive -Path dist/RustWolf.exe -DestinationPath RustWolf-win64.zip -Force
+          $ver = "${{ steps.v.outputs.version }}"
+          New-Item -ItemType Directory -Force pkg/RustWolf | Out-Null
+          Copy-Item target/release/RustWolf.exe, README.md, LICENSE pkg/RustWolf/
+          Compress-Archive -Path pkg/RustWolf -DestinationPath "RustWolf-$ver-win64.zip" -Force
+          $h = Get-FileHash "RustWolf-$ver-win64.zip" -Algorithm SHA256
+          $e = Get-FileHash target/release/RustWolf.exe -Algorithm SHA256
+          "$($h.Hash.ToLower())  RustWolf-$ver-win64.zip`n$($e.Hash.ToLower())  RustWolf.exe (inside the zip)" | Set-Content SHA256SUMS.txt -Encoding ascii
+          (Get-Content .github/release-notes.md -Raw).Replace('VERSION', $ver).Replace('COMMIT', $env:GITHUB_SHA) | Set-Content notes.md -Encoding utf8
 
       - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: pwsh
         run: |
-          $tag = "build-" + (Get-Date -Format "yyyy.MM.dd-HHmm")
-          gh release create $tag RustWolf-win64.zip --title "RustWolf $tag" --notes "RustWolf (Rust + Servo) built automatically from commit $env:GITHUB_SHA. Download RustWolf-win64.zip, unzip, run RustWolf.exe."
+          $ver = "${{ steps.v.outputs.version }}"; $tag = "${{ steps.v.outputs.tag }}"
+          gh release create $tag "RustWolf-$ver-win64.zip" SHA256SUMS.txt --title "RustWolf $ver" --notes-file notes.md --target $env:GITHUB_SHA
