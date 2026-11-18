@@ -8,6 +8,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod blocker;
+mod guard;
 mod keyutils;
 #[allow(dead_code)]
 mod logo;
@@ -51,6 +52,10 @@ pub enum Ev {
     NewTab(WebView),
     Blocked(WebViewId, String),
     Closed(WebViewId),
+    Danger(WebViewId, Url),
+    /// CSS to add to a page (queued: Servo can't start a script from inside another script's answer).
+    Css(WebView, String),
+    Crashed(WebViewId),
 }
 
 /// State Servo's callbacks can reach (they run on the main thread, during `spin_event_loop`).
@@ -58,7 +63,8 @@ pub struct Shared {
     me: OnceCell<Weak<Shared>>,
     window: Rc<Window>,
     pub events: RefCell<Vec<Ev>>,
-    pub blocker: blocker::Blocker,
+    pub blocker: RefCell<blocker::Blocker>,
+    pub ucm: Rc<servo::UserContentManager>,
     /// Sites where the user turned the shield off.
     pub shields_off: RefCell<HashSet<String>>,
     pub rendering_context: Rc<OffscreenRenderingContext>,
@@ -105,12 +111,16 @@ impl WebViewDelegate for Shared {
     fn notify_status_text_changed(&self, webview: WebView, status: Option<String>) {
         self.push(Ev::Status(webview.id(), status));
     }
+    fn notify_crashed(&self, webview: WebView, _reason: String, _backtrace: Option<String>) {
+        self.push(Ev::Crashed(webview.id()));
+    }
     fn notify_closed(&self, webview: WebView) {
         self.push(Ev::Closed(webview.id()));
     }
     fn request_create_new(&self, _parent: WebView, request: servo::CreateNewWebViewRequest) {
         let webview = request
             .builder(self.rendering_context.clone())
+            .user_content_manager(self.ucm.clone())
             .hidpi_scale_factor(Scale::new(self.scale.get()))
             .delegate(self.delegate())
             .build();
@@ -120,6 +130,34 @@ impl WebViewDelegate for Shared {
         // Camera, microphone, location, notifications…: denied unless the user asks for them.
         request.deny();
     }
+    /// Every page navigation: malware/phishing check, tracking-link cleaning, HTTPS upgrade.
+    fn request_navigation(&self, webview: WebView, request: servo::NavigationRequest) {
+        let mut url = request.url.clone();
+        let host = host_of(url.as_str());
+        let protected = !self.shields_off.borrow().contains(&host);
+        let mut changed = false;
+        if protected && self.blocker.borrow().is_dangerous(url.as_str()) {
+            request.deny();
+            self.push(Ev::Danger(webview.id(), url));
+            return;
+        }
+        if protected {
+            if let Some(clean) = blocker::clean_url(&url) {
+                url = clean;
+                changed = true;
+            }
+        }
+        let local = host == "localhost" || host.starts_with("127.") || host.ends_with(".local") || host.starts_with("192.168.") || host.starts_with("10.");
+        if url.scheme() == "http" && !local && url.set_scheme("https").is_ok() {
+            changed = true;
+        }
+        if changed {
+            request.deny();
+            webview.load(url);
+        } else {
+            request.allow();
+        }
+    }
     fn load_web_resource(&self, webview: WebView, load: servo::WebResourceLoad) {
         let req = load.request();
         let url = req.url.as_str().to_string();
@@ -127,18 +165,6 @@ impl WebViewDelegate for Shared {
         let page_host = host_of(&page);
         if self.shields_off.borrow().contains(&page_host) {
             return;
-        }
-        // HTTPS upgrade for pages (not for local addresses).
-        if req.is_for_main_frame && url.starts_with("http://") {
-            let host = host_of(&url);
-            let local = host == "localhost" || host.starts_with("127.") || host.ends_with(".local") || host.starts_with("192.168.");
-            if !local {
-                let https = url.replacen("http://", "https://", 1);
-                if let Ok(target) = Url::parse(&https) {
-                    webview.load(target);
-                    return;
-                }
-            }
         }
         if req.is_for_main_frame {
             return;
@@ -158,12 +184,68 @@ impl WebViewDelegate for Shared {
             "" | "none" => "xmlhttprequest",
             _ => "other",
         };
-        if self.blocker.should_block(&url, &page, kind) {
+        if self.blocker.borrow().should_block(&url, &page, kind) {
             let response = servo::WebResourceResponse::new(req.url.clone().into_url()).status_code(http::StatusCode::FORBIDDEN);
             load.intercept(response).finish();
             self.push(Ev::Blocked(webview.id(), host));
         }
     }
+}
+
+/// Cosmetic filtering: hides ad boxes and banners left empty by blocked requests.
+fn hide_ad_boxes(shared: Rc<Shared>, webview: WebView) {
+    let Some(url) = webview.url().map(|u| u.to_string()) else { return };
+    if shared.shields_off.borrow().contains(&host_of(&url)) || !url.starts_with("http") {
+        return;
+    }
+    let (css, generichide, exceptions) = shared.blocker.borrow().cosmetic_css(&url);
+    inject_css(&webview, "__rw_hide", &css);
+    if generichide {
+        return;
+    }
+    // Generic rules: ask the page which classes/ids it uses, then hide the matching ad elements.
+    let w2 = webview.clone();
+    webview.evaluate_javascript(
+        "(()=>{const c=new Set(),i=new Set();for(const e of document.querySelectorAll('[class],[id]')){if(e.id)i.add(e.id);for(const k of e.classList)c.add(k);}return [...c].join('\\u0001')+'\\u0002'+[...i].join('\\u0001');})()",
+        move |result| {
+            let Ok(servo::JSValue::String(s)) = result else { return };
+            let (c, i) = s.split_once('\u{2}').unwrap_or((s.as_str(), ""));
+            let classes: Vec<String> = c.split('\u{1}').filter(|x| !x.is_empty()).map(String::from).collect();
+            let ids: Vec<String> = i.split('\u{1}').filter(|x| !x.is_empty()).map(String::from).collect();
+            let css = shared.blocker.borrow().class_id_css(&classes, &ids, &exceptions);
+            if !css.is_empty() {
+                shared.push(Ev::Css(w2, css));
+            }
+        },
+    );
+}
+
+fn inject_css(w: &WebView, id: &str, css: &str) {
+    if css.is_empty() {
+        return;
+    }
+    let js = format!(
+        "(()=>{{let s=document.getElementById('{id}');if(!s){{s=document.createElement('style');s.id='{id}';(document.head||document.documentElement).appendChild(s);}}s.textContent={};}})()",
+        js_string(css)
+    );
+    w.evaluate_javascript(js, |_| {});
+}
+
+fn js_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => {}
+            '<' => out.push_str("\\u003c"),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 // ---------------------------------------------------------------- tabs
@@ -176,11 +258,20 @@ pub struct Tab {
     pub blocked: blocker::Blocked,
     pub favicon: Option<egui::TextureHandle>,
     pub status: Option<String>,
+    /// Shown instead of the page (stopped page, dangerous site).
+    pub notice: Option<Notice>,
+}
+
+pub struct Notice {
+    pub title: String,
+    pub text: String,
+    pub url: String,
+    pub danger: bool,
 }
 
 impl Tab {
     fn blank() -> Self {
-        Self { webview: None, title: "New tab".into(), url: String::new(), loading: false, blocked: Default::default(), favicon: None, status: None }
+        Self { webview: None, title: "New tab".into(), url: String::new(), loading: false, blocked: Default::default(), favicon: None, status: None, notice: None }
     }
 }
 
@@ -197,6 +288,8 @@ pub enum Action {
     Home,
     ToggleShield,
     FocusAddress,
+    /// Open a blocked dangerous page anyway (shield off for that site).
+    Proceed(String),
 }
 
 // ---------------------------------------------------------------- the running browser
@@ -227,6 +320,12 @@ pub struct Browser {
     /// Page area in device pixels (inside the window).
     page_rect: Cell<Rect<f32, DevicePixel>>,
     page_focused: bool,
+    guard: guard::MemoryGuard,
+    lists_rx: std::sync::mpsc::Receiver<blocker::Blocker>,
+    guard_cooldown: std::time::Instant,
+    lists_ready: bool,
+    /// Address given on the command line, opened once the protection lists are loaded.
+    pending_url: Option<String>,
 }
 
 impl Browser {
@@ -245,12 +344,42 @@ impl Browser {
         window_rc.make_current().expect("make current");
         let page_rc = Rc::new(window_rc.offscreen_context(window.inner_size()));
 
-        let servo = ServoBuilder::default().event_loop_waker(Box::new(Waker(proxy))).build();
+        // Keep heavy sites from taking over the PC: fewer layout threads and a cap on JavaScript memory.
+        let mut prefs = servo::Preferences::default();
+        prefs.layout_threads = 2;
+        prefs.js_mem_max = 1536; // MB of JavaScript heap per page
+        // Privacy lockdown of the engine itself.
+        prefs.network_enforce_tls_enabled = true; // HTTPS-only (local addresses excepted)
+        prefs.network_http_disk_cache = String::new(); // nothing cached on disk
+        prefs.user_agent = guard::USER_AGENT.into(); // blend in with the most common browser
+        prefs.intl_locale_override = "en-US".into();
+        prefs.dom_webgl2_enabled = false;
+        prefs.dom_webgpu_enabled = false;
+        prefs.dom_webrtc_enabled = false; // no IP leaks through WebRTC
+        prefs.dom_geolocation_enabled = false;
+        prefs.dom_notification_enabled = false;
+        prefs.dom_bluetooth_enabled = false;
+        prefs.dom_gamepad_enabled = false;
+        prefs.dom_webxr_enabled = false;
+        prefs.dom_wakelock_enabled = false;
+        // Every page runs in its own process: a bad or hacked page can't reach the browser,
+        // and a runaway page can be stopped without touching the rest.
+        let opts = servo::Opts { multiprocess: std::env::var_os("RUSTWOLF_SINGLE_PROCESS").is_none(), ..Default::default() };
+        let servo = ServoBuilder::default().opts(opts).preferences(prefs).event_loop_waker(Box::new(Waker(proxy.clone()))).build();
+        if std::env::var_os("RUSTWOLF_LOG").is_some() {
+            servo.setup_logging();
+        }
         let shared = Rc::new(Shared {
             me: OnceCell::new(),
             window: window.clone(),
             events: RefCell::new(Vec::new()),
-            blocker: blocker::Blocker::new(),
+            blocker: RefCell::new(blocker::Blocker::builtin()),
+            ucm: {
+                let ucm = Rc::new(servo::UserContentManager::new(&servo));
+                let seed = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(7);
+                ucm.add_script(Rc::new(servo::UserScript::new(guard::fingerprint_script(seed), None)));
+                ucm
+            },
             shields_off: RefCell::new(HashSet::new()),
             rendering_context: page_rc.clone(),
             scale: Cell::new(window.scale_factor() as f32),
@@ -260,6 +389,26 @@ impl Browser {
         page_rc.make_current().expect("make current");
         let egui = EguiGlow::new(event_loop, page_rc.glow_gl_api(), None, None, false);
         ui::setup(&egui.egui_ctx);
+
+        // Full filter lists load in the background (first start downloads them).
+        let (lists_tx, lists_rx) = std::sync::mpsc::channel();
+        let p2 = proxy.clone();
+        std::thread::Builder::new()
+            .name("filter-lists".into())
+            .spawn(move || {
+                // 1) instantly from the lists saved on disk, 2) then download any that are missing or old.
+                let _ = lists_tx.send(blocker::Blocker::full(false));
+                let _ = p2.send_event(());
+                if blocker::Blocker::needs_update() {
+                    let _ = lists_tx.send(blocker::Blocker::full(true));
+                    let _ = p2.send_event(());
+                }
+            })
+            .ok();
+        let p3 = proxy.clone();
+        let guard = guard::MemoryGuard::start(move || {
+            let _ = p3.send_event(());
+        });
 
         let mut b = Self {
             window,
@@ -275,10 +424,16 @@ impl Browser {
             mouse_window: PhysicalPosition::new(0.0, 0.0),
             page_rect: Cell::new(Rect::zero()),
             page_focused: false,
+            guard,
+            lists_rx,
+            guard_cooldown: std::time::Instant::now(),
+            lists_ready: false,
+            pending_url: None,
         };
         b.ui.focus_address = true;
         if let Some(arg) = std::env::args().nth(1) {
-            b.navigate(&arg);
+            b.pending_url = Some(arg);
+            b.ui.focus_address = false;
         }
         b
     }
@@ -290,6 +445,7 @@ impl Browser {
     fn create_webview(&self, url: Url) -> WebView {
         WebViewBuilder::new(&self.servo, self.page_rc().clone())
             .url(url)
+            .user_content_manager(self.shared.ucm.clone())
             .hidpi_scale_factor(Scale::new(self.shared.scale.get()))
             .delegate(self.shared.delegate())
             .build()
@@ -300,9 +456,30 @@ impl Browser {
     }
 
     fn navigate(&mut self, input: &str) {
-        let Some(url) = ui::resolve_input(input) else { return };
+        let Some(mut url) = ui::resolve_input(input) else { return };
+        let protected = !self.shared.shields_off.borrow().contains(&host_of(url.as_str()));
+        if protected {
+            if let Some(clean) = blocker::clean_url(&url) {
+                url = clean;
+            }
+            if self.shared.blocker.borrow().is_dangerous(url.as_str()) {
+                let t = &mut self.tabs[self.active];
+                t.webview = None;
+                t.url = url.to_string();
+                t.title = "Dangerous site blocked".into();
+                t.notice = Some(Notice {
+                    title: "RustWolf blocked a dangerous site".into(),
+                    text: format!("{} is on a list of known malware or phishing sites. It may try to steal your passwords or install harmful software.", host_of(url.as_str())),
+                    url: url.to_string(),
+                    danger: true,
+                });
+                self.ui.editing = false;
+                return;
+            }
+        }
         let tab = &mut self.tabs[self.active];
         tab.blocked = Default::default();
+        tab.notice = None;
         tab.url = url.to_string();
         match &tab.webview {
             Some(w) => w.load(url),
@@ -313,6 +490,7 @@ impl Browser {
         }
         self.page_focused = true;
         self.ui.editing = false;
+        self.ui.blur = true;
         self.sync_visibility();
     }
 
@@ -400,6 +578,7 @@ impl Browser {
                 t.favicon = None;
                 t.blocked = Default::default();
                 t.loading = false;
+                t.notice = None;
                 self.ui.address.clear();
                 self.ui.focus_address = true;
                 self.page_focused = false;
@@ -416,6 +595,10 @@ impl Browser {
                     }
                 }
                 self.apply(Action::Reload);
+            }
+            Action::Proceed(url) => {
+                self.shared.shields_off.borrow_mut().insert(host_of(&url));
+                self.navigate(&url);
             }
             Action::FocusAddress => {
                 self.ui.focus_address = true;
@@ -447,6 +630,11 @@ impl Browser {
                             t.blocked = Default::default();
                         }
                         t.url = url.to_string();
+                        // The page moved on: show its real address unless the user is typing a new one.
+                        if i == self.active && !self.ui.typed {
+                            self.ui.editing = false;
+                            self.ui.blur = true;
+                        }
                     }
                 }
                 Ev::Load(id, status) => {
@@ -455,6 +643,11 @@ impl Browser {
                         t.loading = !matches!(status, LoadStatus::Complete);
                         if matches!(status, LoadStatus::Started) {
                             t.favicon = None;
+                        }
+                        if matches!(status, LoadStatus::HeadParsed | LoadStatus::Complete) {
+                            if let Some(w) = t.webview.clone() {
+                                hide_ad_boxes(self.shared.clone(), w);
+                            }
                         }
                     }
                 }
@@ -475,6 +668,50 @@ impl Browser {
                 Ev::Blocked(id, host) => {
                     if let Some(i) = self.tab_index(id) {
                         self.tabs[i].blocked.add(host);
+                    }
+                }
+                Ev::Danger(id, url) => {
+                    if let Some(i) = self.tab_index(id) {
+                        let t = &mut self.tabs[i];
+                        t.webview = None;
+                        t.loading = false;
+                        t.url = url.to_string();
+                        t.title = "Dangerous site blocked".into();
+                        t.notice = Some(Notice {
+                            title: "RustWolf blocked a dangerous site".into(),
+                            text: format!("{} is on a list of known malware or phishing sites. It may try to steal your passwords or install harmful software.", host_of(url.as_str())),
+                            url: url.to_string(),
+                            danger: true,
+                        });
+                    }
+                }
+                Ev::Css(w, css) => inject_css(&w, "__rw_hide2", &css),
+                Ev::Crashed(id) => {
+                    if let Some(i) = self.tab_index(id) {
+                        let killed = self.guard.killed_mb.swap(0, std::sync::atomic::Ordering::Relaxed);
+                        let limit = self.guard.limit_mb;
+                        let t = &mut self.tabs[i];
+                        t.webview = None;
+                        t.loading = false;
+                        t.notice = Some(if killed > 0 {
+                            Notice {
+                                title: "Page stopped to protect your PC".into(),
+                                text: format!(
+                                    "This page used {:.1} GB of memory, more than the {:.1} GB limit, so RustWolf stopped it. Your other tabs are fine.",
+                                    killed as f64 / 1024.0,
+                                    limit as f64 / 1024.0
+                                ),
+                                url: t.url.clone(),
+                                danger: false,
+                            }
+                        } else {
+                            Notice {
+                                title: "This page crashed".into(),
+                                text: "The page stopped working (it may have run out of memory). Your other tabs are fine.".into(),
+                                url: t.url.clone(),
+                                danger: false,
+                            }
+                        });
                     }
                 }
                 Ev::Closed(id) => {
@@ -499,7 +736,7 @@ impl Browser {
             let Browser { egui, ui, tabs, active: active_i, shared, window, .. } = self;
             let ctx_scale = scale;
             egui.run(window, |ctx| {
-                let page = ui::draw(ctx, ui, tabs, *active_i, &shared.blocker, &shared.shields_off.borrow(), &mut actions);
+                let page = ui::draw(ctx, ui, tabs, *active_i, &shared.blocker.borrow(), &shared.shields_off.borrow(), &mut actions);
                 page_rect_px = Rect::new(
                     Point2D::new(page.min.x * ctx_scale, page.min.y * ctx_scale),
                     Size2D::new(page.width() * ctx_scale, page.height() * ctx_scale),
@@ -541,6 +778,42 @@ impl Browser {
         }
         if self.egui.egui_ctx.has_requested_repaint() || self.tabs.iter().any(|t| t.loading) {
             self.window.request_redraw();
+        }
+    }
+
+    /// Picks up freshly loaded filter lists, and stops a page that eats too much memory.
+    fn background_checks(&mut self) {
+        while let Ok(full) = self.lists_rx.try_recv() {
+            *self.shared.blocker.borrow_mut() = full;
+            self.lists_ready = true;
+            self.window.request_redraw();
+        }
+        if self.lists_ready {
+            if let Some(url) = self.pending_url.take() {
+                self.navigate(&url);
+            }
+        }
+        if self.guard.over() && self.guard_cooldown.elapsed().as_secs() >= 5 {
+            self.guard_cooldown = std::time::Instant::now();
+            // Stop the page being viewed first; if memory is still too high next time, background tabs go too.
+            let order: Vec<usize> = std::iter::once(self.active).chain((0..self.tabs.len()).filter(|i| *i != self.active)).collect();
+            if let Some(i) = order.into_iter().find(|i| self.tabs[*i].webview.is_some()) {
+                let used = self.guard.current_mb.load(std::sync::atomic::Ordering::Relaxed);
+                let t = &mut self.tabs[i];
+                t.webview = None; // closing the page frees its memory
+                t.loading = false;
+                t.notice = Some(Notice {
+                    title: "Page stopped to protect your PC".into(),
+                    text: format!(
+                        "This page made RustWolf use {:.1} GB of memory, more than the {:.1} GB limit, so it was stopped before your PC could slow down.",
+                        used as f64 / 1024.0,
+                        self.guard.limit_mb as f64 / 1024.0
+                    ),
+                    url: t.url.clone(),
+                    danger: false,
+                });
+                self.window.request_redraw();
+            }
         }
     }
 
@@ -609,6 +882,9 @@ impl Browser {
                 return;
             }
             WindowEvent::Resized(size) => {
+                if size.width == 0 || size.height == 0 {
+                    return; // minimized
+                }
                 self.window_rc.resize(*size);
                 self.window.request_redraw();
             }
@@ -719,6 +995,7 @@ impl ApplicationHandler<()> for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
         if let App::Running(b) = self {
             b.servo.spin_event_loop();
+            b.background_checks();
             if !b.shared.events.borrow().is_empty() {
                 b.window.request_redraw();
             }
@@ -731,7 +1008,25 @@ impl ApplicationHandler<()> for App {
     }
 }
 
+/// Runs RustWolf below normal priority, so a heavy page can never make Windows itself lag:
+/// your other apps (and the mouse, the taskbar…) always get the CPU first.
+fn lower_priority() {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS};
+    unsafe {
+        SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS);
+    }
+}
+
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 3 && args[1] == "--content-process" {
+        // A page process started by Servo.
+        lower_priority();
+        servo::run_content_process(args[2].clone());
+        return;
+    }
+    lower_priority();
+    guard::hard_memory_cap();
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let event_loop = EventLoop::with_user_event().build().expect("event loop");
     let mut app = App::Starting(event_loop.create_proxy());

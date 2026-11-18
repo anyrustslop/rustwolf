@@ -37,12 +37,14 @@ pub struct UiState {
     pub blur: bool,
     pub shield_open: bool,
     pub popup_open: bool,
+    /// The user changed the address text since focusing it.
+    pub typed: bool,
     logo: Option<egui::TextureHandle>,
 }
 
 impl UiState {
     pub fn new() -> Self {
-        Self { address: String::new(), editing: false, focus_address: false, blur: false, shield_open: false, popup_open: false, logo: None }
+        Self { address: String::new(), editing: false, focus_address: false, blur: false, shield_open: false, popup_open: false, typed: false, logo: None }
     }
 }
 
@@ -284,6 +286,12 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
                 resp.surrender_focus();
                 st.blur = false;
             }
+            if resp.changed() {
+                st.typed = true;
+            }
+            if !resp.has_focus() {
+                st.typed = false;
+            }
             if resp.changed() || resp.has_focus() {
                 st.editing = resp.has_focus() || resp.changed();
             }
@@ -357,7 +365,8 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
                 });
             }
             ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-                ui.label(egui::RichText::new(format!("{} blocking rules · HTTPS upgrade on · permissions denied by default · nothing saved to disk", blocker.rule_count)).size(11.0).color(SUBTLE));
+                ui.label(egui::RichText::new("HTTPS-only · tracking links cleaned · fingerprint protection · WebRTC, location, camera & mic off · nothing saved to disk").size(11.0).color(SUBTLE));
+                ui.label(egui::RichText::new(format!("{} rules: {}", blocker.rule_count, blocker.lists.join(", "))).size(11.0).color(SUBTLE));
             });
         });
     }
@@ -366,7 +375,9 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
     let mut page = Rect::NOTHING;
     egui::CentralPanel::default().frame(Frame::new().fill(BG)).show_inside(root, |ui| {
         page = ui.max_rect();
-        if tab.webview.is_none() {
+        if let (None, Some(n)) = (&tab.webview, &tab.notice) {
+            notice_page(ui, n, actions);
+        } else if tab.webview.is_none() {
             new_tab_page(ui, st, actions);
         } else if let Some(s) = &tab.status {
             let galley = ui.painter().layout_no_wrap(s.clone(), FontId::proportional(12.0), TEXT);
@@ -376,6 +387,38 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
         }
     });
     page
+}
+
+fn notice_page(ui: &mut egui::Ui, n: &crate::Notice, actions: &mut Vec<Action>) {
+    let rect = ui.max_rect();
+    let w = 560.0_f32.min(rect.width() - 40.0);
+    let area = Rect::from_center_size(rect.center(), vec2(w, 260.0));
+    ui.scope_builder(egui::UiBuilder::new().max_rect(area).layout(Layout::top_down(Align::Center)), |ui| {
+        ui.label(egui::RichText::new(icon::SHIELD).font(icons(46.0)).color(if n.danger { RED } else { SUBTLE }));
+        ui.add_space(10.0);
+        ui.label(egui::RichText::new(&n.title).size(22.0).strong());
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new(&n.text).size(14.0).color(SUBTLE));
+        ui.add_space(18.0);
+        ui.horizontal(|ui| {
+            ui.add_space((w - 340.0).max(0.0) / 2.0);
+            if n.danger {
+                if ui.add(egui::Button::new(egui::RichText::new("Go back to safety").color(Color32::WHITE)).fill(RED).min_size(vec2(170.0, 36.0))).clicked() {
+                    actions.push(Action::Home);
+                }
+                if ui.add(egui::Button::new("Open anyway (unsafe)").min_size(vec2(160.0, 36.0))).clicked() {
+                    actions.push(Action::Proceed(n.url.clone()));
+                }
+            } else {
+                if ui.add(egui::Button::new(egui::RichText::new("Reload page").color(Color32::WHITE)).fill(RED).min_size(vec2(170.0, 36.0))).clicked() {
+                    actions.push(Action::Navigate(n.url.clone()));
+                }
+                if ui.add(egui::Button::new("New tab page").min_size(vec2(160.0, 36.0))).clicked() {
+                    actions.push(Action::Home);
+                }
+            }
+        });
+    });
 }
 
 fn new_tab_page(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<Action>) {
@@ -400,7 +443,7 @@ fn new_tab_page(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<Action>) 
     p.galley(Pos2::new(x0 + rust.size().x, title_y - wolf.size().y / 2.0), wolf, RED);
     p.text(Pos2::new(center.x, title_y + 36.0), Align2::CENTER_CENTER, "Private by default. Written in Rust.", FontId::proportional(14.0), SUBTLE);
 
-    let chips = ["Built-in tracker blocking", "HTTPS upgrade", "Nothing saved to disk", "No telemetry", "Servo engine (Rust)"];
+    let chips = ["Ad & tracker blocking", "HTTPS-only", "Fingerprint protection", "Clean links", "Malware & phishing shield", "Nothing saved to disk", "Servo engine (Rust)"];
     let y = title_y + 80.0;
     let widths: Vec<f32> = chips.iter().map(|c| p.layout_no_wrap((*c).into(), FontId::proportional(12.5), TEXT).size().x + 26.0).collect();
     let mut x = center.x - (widths.iter().sum::<f32>() + 8.0 * (chips.len() - 1) as f32) / 2.0;
