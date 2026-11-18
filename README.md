@@ -11,7 +11,7 @@ A privacy-first web browser **written in Rust**, built on **[Servo](https://serv
 ![RustWolf](screenshots/guardian.png)
 
 ## Download
-Get **RustWolf-<version>-win64.zip** from the [latest release](../../releases/latest), unzip it and run `RustWolf.exe` (Windows 10/11, no install needed). Each release also has `SHA256SUMS.txt` to verify the download, and the full source code.
+Get **RustWolf-<version>-win64.exe** from the [latest release](../../releases/latest) and run it (Windows 10/11, no install needed; the exe isn't code-signed, so SmartScreen may ask you to click **More info → Run anyway**). Each release also has `SHA256SUMS.txt` to verify the download, and the full source code.
 Releases are built by [GitHub Actions](.github/workflows/build.yml) for every version tag, plus a weekly build that pulls in Servo and dependency (security) fixes.
 
 ## Privacy

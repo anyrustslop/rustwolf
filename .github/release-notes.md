@@ -7,9 +7,9 @@
 RustWolf is a privacy-first web browser **written in Rust**, built on the **Servo** web engine (also Rust).
 
 ## Download
-1. Download **`RustWolf-VERSION-win64.zip`** below.
-2. Unzip it anywhere and run **`RustWolf.exe`** (Windows 10/11, no install, no admin rights).
-3. Optional: check the download against **`SHA256SUMS.txt`** (in PowerShell: `Get-FileHash RustWolf-VERSION-win64.zip`).
+1. Download **`RustWolf-VERSION-win64.exe`** below.
+2. Run it (Windows 10/11, no install, no admin rights). The exe isn't code-signed, so Windows SmartScreen may warn you: click **More info → Run anyway**.
+3. Optional: check the download against **`SHA256SUMS.txt`** (in PowerShell: `Get-FileHash RustWolf-VERSION-win64.exe`).
 
 The full source code is attached as **Source code (zip / tar.gz)**.
 

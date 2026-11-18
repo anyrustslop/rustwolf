@@ -1,7 +1,7 @@
 name: Build RustWolf
 
 # - push to main: build check only
-# - tag vX.Y.Z:  build + versioned release (program zip, checksums, release notes, source code)
+# - tag vX.Y.Z:  build + versioned release (RustWolf .exe, checksums, release notes, source code)
 # - weekly:      update dependencies (Servo + security fixes), build + release
 on:
   push:
@@ -55,12 +55,9 @@ jobs:
         shell: pwsh
         run: |
           $ver = "${{ steps.v.outputs.version }}"
-          New-Item -ItemType Directory -Force pkg/RustWolf | Out-Null
-          Copy-Item target/release/RustWolf.exe, README.md, LICENSE pkg/RustWolf/
-          Compress-Archive -Path pkg/RustWolf -DestinationPath "RustWolf-$ver-win64.zip" -Force
-          $h = Get-FileHash "RustWolf-$ver-win64.zip" -Algorithm SHA256
-          $e = Get-FileHash target/release/RustWolf.exe -Algorithm SHA256
-          "$($h.Hash.ToLower())  RustWolf-$ver-win64.zip`n$($e.Hash.ToLower())  RustWolf.exe (inside the zip)" | Set-Content SHA256SUMS.txt -Encoding ascii
+          Copy-Item target/release/RustWolf.exe "RustWolf-$ver-win64.exe"
+          $h = Get-FileHash "RustWolf-$ver-win64.exe" -Algorithm SHA256
+          "$($h.Hash.ToLower())  RustWolf-$ver-win64.exe" | Set-Content SHA256SUMS.txt -Encoding ascii
           (Get-Content .github/release-notes.md -Raw).Replace('VERSION', $ver).Replace('COMMIT', $env:GITHUB_SHA) | Set-Content notes.md -Encoding utf8
 
       - name: Publish release
@@ -70,4 +67,4 @@ jobs:
         shell: pwsh
         run: |
           $ver = "${{ steps.v.outputs.version }}"; $tag = "${{ steps.v.outputs.tag }}"
-          gh release create $tag "RustWolf-$ver-win64.zip" SHA256SUMS.txt --title "RustWolf $ver" --notes-file notes.md --target $env:GITHUB_SHA
+          gh release create $tag "RustWolf-$ver-win64.exe" SHA256SUMS.txt --title "RustWolf $ver" --notes-file notes.md --target $env:GITHUB_SHA
