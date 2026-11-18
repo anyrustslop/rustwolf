@@ -45,7 +45,7 @@ pub struct UiState {
     pub restart_needed: bool,
     pub maximized: bool,
     /// Newer release on GitHub: (version tag, release page).
-    pub update: Option<(String, String)>,
+    pub update: Option<crate::updater::Update>,
     pub vault_open: bool,
     /// Master password being typed (cleared as soon as it's handed to Bitwarden).
     pub vault_password: String,
@@ -333,10 +333,21 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
             // Address bar.
             let host = host_of(&tab.url);
             let shield_on = !shields_off.contains(&host);
-            if let Some((tag, url)) = &st.update {
-                if ui.add(egui::Button::new(egui::RichText::new(format!("Update to {tag}")).size(12.5).color(Color32::WHITE)).fill(RED).corner_radius(10.0).min_size(vec2(110.0, 30.0))).on_hover_text("A newer RustWolf with security fixes is available").clicked() {
-                    actions.push(Action::OpenInNewTab(url.clone()));
+            match &st.update {
+                Some(crate::updater::Update::Ready(tag)) => {
+                    if ui.add(egui::Button::new(egui::RichText::new(format!("Restart to update ({tag})")).size(12.5).color(Color32::WHITE)).fill(RED).corner_radius(10.0).min_size(vec2(150.0, 30.0))).on_hover_text("The new version is downloaded and verified. It also installs by itself the next time you open RustWolf.").clicked() {
+                        actions.push(Action::Restart);
+                    }
                 }
+                Some(crate::updater::Update::Downloading(tag)) => {
+                    ui.add(egui::Label::new(egui::RichText::new(format!("Updating to {tag}…")).size(12.0).color(SUBTLE)).selectable(false));
+                }
+                Some(crate::updater::Update::Manual(tag, url)) => {
+                    if ui.add(egui::Button::new(egui::RichText::new(format!("Update to {tag}")).size(12.5).color(Color32::WHITE)).fill(RED).corner_radius(10.0).min_size(vec2(110.0, 30.0))).on_hover_text("A newer RustWolf is available; open its download page").clicked() {
+                        actions.push(Action::OpenInNewTab(url.clone()));
+                    }
+                }
+                None => {}
             }
             // Restart button (after turning Tor on/off) and Tor status chip.
             if st.restart_needed {

@@ -48,7 +48,7 @@ RustWolf can't run browser extensions (Servo doesn't support them), so it talks 
 - **Hardened mode** (part of Strict): the JavaScript JIT compilers and WebAssembly are off, closing the most-attacked part of the engine.
 - **Per-site "block third-party scripts"** switch in the shield panel (scripts written into the page itself still run).
 - **Letterboxing:** with fingerprint protection on, the page size is rounded to 100 px steps so your window size can't identify you.
-- **Update check:** RustWolf shows an Update button when a newer release exists; the check (and filter-list downloads) go through Tor when Tor is on.
+- **Automatic updates:** new versions download in the background (through Tor when Tor is on), are checked against the release's SHA-256, and install on "Restart to update" or the next start. The previous copy is kept until the new one runs.
 - **Verifiable releases:** every release has SHA-256 sums and signed build provenance (`gh attestation verify RustWolf-<version>-win64.exe --repo anyrustslop/rustwolf`), and every build runs a RustSec security audit of all dependencies.
 - **Each page runs in its own process**, so a bad page can't reach the browser.
 - **Memory guard:** a page process using more than 2 GB (less on PCs with under 12 GB of RAM) is stopped within a quarter of a second (only that page); Windows caps every RustWolf process too, so one heavy site can never freeze your PC.

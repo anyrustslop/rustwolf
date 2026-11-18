@@ -14,6 +14,7 @@ mod keyutils;
 mod logo;
 mod settings;
 mod tor;
+mod updater;
 mod setup_ui;
 mod ui;
 mod vault;
@@ -277,31 +278,6 @@ fn wait_for_tor(tor: &Option<std::sync::Arc<std::sync::atomic::AtomicU8>>) -> Op
     Some("http://127.0.0.1:9".into())
 }
 
-/// Checks GitHub for a newer RustWolf release (through Tor when Tor is on).
-fn check_for_update(tx: std::sync::mpsc::Sender<(String, String)>, proxy: EventLoopProxy<()>, tor: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>) {
-    std::thread::Builder::new()
-        .name("update-check".into())
-        .spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs(5));
-            let mut builder = ureq::AgentBuilder::new().timeout(std::time::Duration::from_secs(60));
-            if let Some(p) = wait_for_tor(&tor).and_then(|p| ureq::Proxy::new(p).ok()) {
-                builder = builder.proxy(p);
-            }
-            let Ok(resp) = builder.build().get("https://api.github.com/repos/anyrustslop/rustwolf/releases/latest").set("User-Agent", "RustWolf").call() else { return };
-            let mut body = String::new();
-            if std::io::Read::read_to_string(&mut std::io::Read::take(resp.into_reader(), 2 * 1024 * 1024), &mut body).is_err() {
-                return;
-            }
-            let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) else { return };
-            let (Some(tag), Some(url)) = (v["tag_name"].as_str(), v["html_url"].as_str()) else { return };
-            let num = |s: &str| -> Vec<u64> { s.trim_start_matches('v').split(|c: char| !c.is_ascii_digit()).filter_map(|p| p.parse().ok()).take(3).collect() };
-            if num(tag) > num(env!("CARGO_PKG_VERSION")) && url.starts_with("https://github.com/anyrustslop/rustwolf/") {
-                let _ = tx.send((tag.to_string(), url.to_string()));
-                let _ = proxy.send_event(());
-            }
-        })
-        .ok();
-}
 
 /// Cosmetic filtering: hides ad boxes and banners left empty by blocked requests.
 fn hide_ad_boxes(shared: Rc<Shared>, webview: WebView) {
@@ -452,7 +428,7 @@ pub struct Browser {
     lists_rx: std::sync::mpsc::Receiver<blocker::Blocker>,
     guard_cooldown: std::time::Instant,
     lists_ready: bool,
-    update_rx: std::sync::mpsc::Receiver<(String, String)>,
+    update_rx: std::sync::mpsc::Receiver<updater::Update>,
     tor: Option<tor::Tor>,
     exit_requested: bool,
     on_edge: bool,
@@ -558,7 +534,7 @@ impl Browser {
         let tor_progress = tor.as_ref().map(|t| t.progress.clone());
         load_lists(lists_tx.clone(), proxy.clone(), user_settings.clone(), tor_progress.clone());
         let (update_tx, update_rx) = std::sync::mpsc::channel();
-        check_for_update(update_tx, proxy.clone(), tor_progress);
+        updater::start(update_tx, proxy.clone(), tor_progress, wait_for_tor);
         let p3 = proxy.clone();
         let guard = guard::MemoryGuard::start(move || {
             let _ = p3.send_event(());
@@ -758,6 +734,12 @@ impl Browser {
             }
             Action::VaultCheck => self.vault.check_status(),
             Action::Restart => {
+                // A verified update is waiting: swap it in and start it.
+                if updater::staged_ready() && updater::install_and_relaunch(&[]) {
+                    self.exit_requested = true;
+                    self.window.request_redraw();
+                    return;
+                }
                 // Start a fresh RustWolf outside our memory-limit job (so it isn't closed with us), then quit.
                 if let Ok(exe) = std::env::current_exe() {
                     use std::os::windows::process::CommandExt;
@@ -1065,7 +1047,7 @@ impl Browser {
         if self.vault.poll(&url) {
             self.window.request_redraw();
         }
-        if let Ok(update) = self.update_rx.try_recv() {
+        while let Ok(update) = self.update_rx.try_recv() {
             self.ui.update = Some(update);
             self.window.request_redraw();
         }
@@ -1415,6 +1397,12 @@ fn main() {
         // A page process started by Servo.
         lower_priority();
         servo::run_content_process(args[2].clone());
+        return;
+    }
+    // Auto-update: remove the copy replaced last time, and install a verified update waiting from
+    // the last session (the new version is started and this one quits).
+    updater::cleanup_old();
+    if updater::install_and_relaunch(&args[1..]) {
         return;
     }
     lower_priority();

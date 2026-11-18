@@ -21,6 +21,9 @@ The full source code is attached as **Source code (zip / tar.gz)**.
 - WebRTC, WebGL, WebGPU, location, notifications, Bluetooth and more are switched off; permission requests are denied.
 - Private by default: cookies, cache and history stay in memory and are forgotten when RustWolf closes. No telemetry.
 
+## New in 0.6
+- **Automatic updates:** RustWolf downloads new versions in the background (through Tor when Tor is on), checks them against the release's SHA-256, and installs them when you click "Restart to update" or the next time you open it. The previous version is kept until the new one has started. (Coming from 0.5.x or older? Download this version once by hand; after that it updates itself.)
+
 ## New in 0.5.1
 - Firefox-style window: no Windows title bar; minimize / maximize / close sit at the top right of the tab strip (drag the empty space to move, double-click to maximize, resize from the edges).
 - Bitwarden button shows a Bitwarden-style shield; the Tor status shows an onion.
