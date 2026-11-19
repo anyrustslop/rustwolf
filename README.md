@@ -12,7 +12,7 @@ A privacy-first web browser **written in Rust**, built on **[Servo](https://serv
 
 ## Download
 Get **RustWolf-<version>-win64.exe** from the [latest release](../../releases/latest) and run it (Windows 10/11, no install needed; the exe isn't code-signed, so SmartScreen may ask you to click **More info → Run anyway**). Each release also has `SHA256SUMS.txt` to verify the download, and the full source code.
-Releases are built by [GitHub Actions](.github/workflows/build.yml) for every version tag, plus a weekly build that pulls in Servo and dependency (security) fixes.
+Releases are built by [GitHub Actions](.github/workflows/build.yml) for every version tag. A weekly pre-release build also pulls in dependency (security) fixes; auto-update only installs real version releases. Servo itself is pinned to an exact version because RustWolf ships modified copies of some of its crates: moving to a new Servo version is done by hand, and the build refuses to run if a modified crate would be replaced by an upstream one.
 
 ## First-run setup
 The first time you open RustWolf it asks how you want to be protected (change it anytime with the gear button):

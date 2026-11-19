@@ -40,6 +40,25 @@ jobs:
           key: rustwolf-${{ hashFiles('Cargo.lock') }}
           restore-keys: rustwolf-
 
+      - name: Check RustWolf's patched crates are used
+        shell: pwsh
+        run: |
+          # If a dependency update ever pulled in an upstream copy of a crate RustWolf patches
+          # (see patches/), its protections would silently disappear. Refuse to build then.
+          $m = cargo metadata --format-version 1 --locked | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { $m = cargo metadata --format-version 1 | ConvertFrom-Json }
+          $bad = @()
+          foreach ($name in "servo", "servo-net", "servo-storage", "servo-fonts", "ipc-channel", "rustwolf-shared") {
+            $pkgs = @($m.packages | Where-Object { $_.name -eq $name })
+            if ($pkgs.Count -eq 0) { $bad += "$name (missing)" }
+            foreach ($p in $pkgs) { if ($p.source) { $bad += "$name $($p.version) from $($p.source)" } }
+          }
+          if ($bad.Count) {
+            Write-Output "::error title=Patched crate not used::$($bad -join ' | ')"
+            exit 1
+          }
+          Write-Output "All patched crates come from patches/."
+
       - name: Build
         run: cargo build --release
 
@@ -86,7 +105,9 @@ jobs:
         run: |
           $ver = "${{ steps.v.outputs.version }}"; $tag = "${{ steps.v.outputs.tag }}"
           $extra = @()
-          if ($env:GITHUB_REF -notlike "refs/tags/v*") { $extra = @("--target", $env:GITHUB_SHA) }  # weekly builds create their tag
+          # Weekly / manual builds create their own tag and are pre-releases: "latest" (and so
+          # RustWolf's auto-update) always stays on a real version release.
+          if ($env:GITHUB_REF -notlike "refs/tags/v*") { $extra = @("--target", $env:GITHUB_SHA, "--prerelease") }
           $out = gh release create $tag "RustWolf-$ver-win64.exe" SHA256SUMS.txt --title "RustWolf $ver" --notes-file notes.md @extra 2>&1
           $code = $LASTEXITCODE
           $out

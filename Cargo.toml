@@ -11,7 +11,11 @@ name = "RustWolf"
 path = "src/main.rs"
 
 [dependencies]
-servo = "0.8.0"
+# Exact versions: RustWolf ships modified copies of some of these crates (see [patch] below and
+# patches/), so a dependency update must never swap in an unmodified upstream version. Moving
+# to a new Servo version is done by hand, porting the patches.
+servo = "=0.8.0"
+ipc-channel = "=0.23.1"
 winit = "0.30.13"
 egui = "0.34.3"
 egui-winit = { version = "0.34.3", default-features = false, features = ["clipboard", "links"] }
@@ -27,7 +31,7 @@ serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 arboard = "3"
-net = { package = "servo-net", version = "0.8.0" }
+net = { package = "servo-net", version = "=0.8.0" }
 rustwolf-shared = { path = "patches/rustwolf-shared" }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 

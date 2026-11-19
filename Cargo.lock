@@ -5341,6 +5341,7 @@ dependencies = [
  "euclid",
  "glow",
  "http",
+ "ipc-channel",
  "rustls",
  "rustwolf-shared",
  "serde",
