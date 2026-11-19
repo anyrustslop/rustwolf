@@ -1,6 +1,6 @@
 ﻿[package]
 name = "rustwolf"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2021"
 description = "RustWolf - a privacy-first web browser written in Rust, on the Servo engine"
 license = "MPL-2.0"
@@ -43,3 +43,4 @@ servo-net = { path = "patches/servo-net" }
 servo-storage = { path = "patches/servo-storage" }
 ipc-channel = { path = "patches/ipc-channel" }
 servo = { path = "patches/servo" }
+servo-fonts = { path = "patches/servo-fonts" }

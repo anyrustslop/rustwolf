@@ -22,6 +22,10 @@ The full source code is attached as **Source code (zip / tar.gz)**.
 - WebRTC, WebGL, WebGPU, location, notifications, Bluetooth and more are switched off; permission requests are denied.
 - Private by default: cookies, cache and history stay in memory and are forgotten when RustWolf closes. No telemetry.
 
+## New in 0.8.2
+- **Fingerprint fixes** (Tor Browser / Firefox crowd): the JavaScript engine now uses en-US instead of your PC's language (dates, numbers, `Intl`); only fonts every Windows 10/11 PC has are visible to sites (your extra fonts are hidden); Firefox's PDF-viewer plugins, `navigator.webdriver`, `-moz-` CSS and consistent screen-resolution queries; coarse timers (≈17 ms).
+- Page processes now always stop when RustWolf closes, even if it crashed.
+
 ## New in 0.8.1
 - **Real page sandbox:** every page now runs in a locked-down copy of its process: your Windows account is switched off in its token, it runs at Low integrity with no privileges. A page that hacked the engine couldn't open your files or registry, couldn't write anywhere and couldn't touch your other programs or the browser process (on top of 0.7's no-programs job and exploit mitigations).
 - **Third-party storage partitioned:** a site embedded in another site's page (tracker, ad frame) gets a separate, empty `localStorage` / `sessionStorage` on every site, an empty `document.cookie`, and no Cache Storage.

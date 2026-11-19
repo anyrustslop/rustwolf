@@ -1404,6 +1404,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     // Pipe permissions for the engine's processes (inherited by every page process).
     guard::set_pipe_security();
+    if !(args.len() >= 3 && args[1] == "--content-process") {
+        // The browser process: page processes stop when it goes away.
+        std::env::set_var("RUSTWOLF_BROWSER_PID", std::process::id().to_string());
+    }
     if args.len() >= 3 && args[1] == "--content-process" {
         // A page process started by Servo.
         lower_priority();
@@ -1411,8 +1415,10 @@ fn main() {
             // The locked-down copy: it can't read RustWolf's settings, its launcher passes them.
             std::env::var("RUSTWOLF_HARDENED").is_ok_and(|v| v == "1")
         } else {
-            let hardened = settings::Settings::load().hardened;
+            let s = settings::Settings::load();
+            let hardened = s.hardened;
             std::env::set_var("RUSTWOLF_HARDENED", if hardened { "1" } else { "0" });
+            std::env::set_var("RUSTWOLF_FINGERPRINT", if s.fingerprint { "1" } else { "0" });
             std::env::set_var("RUSTWOLF_PAGE_SANDBOXED", "1");
             std::env::set_var("RUSTWOLF_LAUNCHER_PID", std::process::id().to_string());
             if let Some(code) = guard::run_restricted_page_process() {
@@ -1422,6 +1428,9 @@ fn main() {
             std::env::remove_var("RUSTWOLF_LAUNCHER_PID");
             hardened
         };
+        if std::env::var("RUSTWOLF_FINGERPRINT").is_ok_and(|v| v == "1") {
+            guard::set_engine_locale_en_us();
+        }
         guard::lockdown_content_process(hardened);
         if std::env::var_os("RUSTWOLF_SANDBOX_TEST").is_some() {
             eprintln!("[sandbox] restricted copy: {}", std::env::var_os("RUSTWOLF_PAGE_SANDBOXED").is_some());
@@ -1440,6 +1449,8 @@ fn main() {
     // Tor Browser's timezone for the engine (page processes inherit it).
     if settings::Settings::load().fingerprint {
         std::env::set_var("TZ", guard::TIMEZONE);
+        // Only standard Windows fonts are visible to pages (read by the servo-fonts patch).
+        std::env::set_var("RUSTWOLF_FONT_ALLOWLIST", "1");
     }
     lower_priority();
     guard::hard_memory_cap();

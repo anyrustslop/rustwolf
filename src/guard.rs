@@ -88,7 +88,110 @@ pub fn fingerprint_script(seed: u32) -> String {
   try {{ delete Navigator.prototype.getBattery; }} catch (e) {{}}
 }})();"#
     );
-    main + TIMEZONE_SCRIPT
+    main + TIMEZONE_SCRIPT + FIREFOX_SCRIPT
+}
+
+/// Details where Servo differs from Firefox and fingerprinting scripts look: Firefox's built-in
+/// PDF viewer entries, `navigator.webdriver`, `-moz-` CSS, `mozInnerScreenX`, `matchMedia`
+/// resolution matching the reported pixel ratio, and coarse timers (≈17 ms, like Firefox with
+/// resist-fingerprinting; also blunts timing attacks).
+const FIREFOX_SCRIPT: &str = r#"
+(() => {
+  const def = (o, k, get) => { try { Object.defineProperty(o, k, { get, configurable: true, enumerable: true }); } catch (e) {} };
+  def(Navigator.prototype, 'webdriver', function () { return false; });
+  def(Navigator.prototype, 'pdfViewerEnabled', function () { return true; });
+  try {
+    const mime = (type) => Object.create(typeof MimeType !== 'undefined' ? MimeType.prototype : Object.prototype, {
+      type: { value: type, enumerable: true }, suffixes: { value: 'pdf', enumerable: true },
+      description: { value: 'Portable Document Format', enumerable: true },
+    });
+    const mimes = [mime('application/pdf'), mime('text/pdf')];
+    const names = ['PDF Viewer', 'Chrome PDF Viewer', 'Chromium PDF Viewer', 'Microsoft Edge PDF Viewer', 'WebKit built-in PDF'];
+    const list = (proto, items, key) => {
+      const o = Object.create(proto);
+      items.forEach((it, i) => Object.defineProperty(o, i, { value: it, enumerable: true }));
+      Object.defineProperties(o, {
+        length: { value: items.length },
+        item: { value: (i) => items[i] || null },
+        namedItem: { value: (n) => items.find((it) => it[key] === n) || null },
+        refresh: { value: () => {} },
+        [Symbol.iterator]: { value: function* () { yield* items; } },
+      });
+      return o;
+    };
+    const plugins = names.map((name) => {
+      const p = list(typeof Plugin !== 'undefined' ? Plugin.prototype : Object.prototype, mimes, 'type');
+      Object.defineProperties(p, {
+        name: { value: name, enumerable: true }, filename: { value: 'internal-pdf-viewer', enumerable: true },
+        description: { value: 'Portable Document Format', enumerable: true },
+      });
+      return p;
+    });
+    mimes.forEach((m) => Object.defineProperty(m, 'enabledPlugin', { value: plugins[0], enumerable: true }));
+    const pa = list(typeof PluginArray !== 'undefined' ? PluginArray.prototype : Object.prototype, plugins, 'name');
+    const ma = list(typeof MimeTypeArray !== 'undefined' ? MimeTypeArray.prototype : Object.prototype, mimes, 'type');
+    def(Navigator.prototype, 'plugins', function () { return pa; });
+    def(Navigator.prototype, 'mimeTypes', function () { return ma; });
+  } catch (e) {}
+  try {
+    if (typeof CSSStyleDeclaration !== 'undefined' && !('MozAppearance' in CSSStyleDeclaration.prototype)) {
+      Object.defineProperty(CSSStyleDeclaration.prototype, 'MozAppearance', {
+        get() { return this.getPropertyValue('appearance'); },
+        set(v) { this.setProperty('appearance', v); },
+        configurable: true, enumerable: true,
+      });
+    }
+    const sup = CSS.supports;
+    CSS.supports = function (...a) {
+      const r = sup.apply(CSS, a);
+      if (r) return r;
+      return /-moz-appearance/i.test(String(a[0])) ? sup.apply(CSS, a.map((x) => String(x).replace(/-moz-appearance/ig, 'appearance'))) || true : false;
+    };
+  } catch (e) {}
+  def(window, 'mozInnerScreenX', function () { return 0; });
+  def(window, 'mozInnerScreenY', function () { return 0; });
+  try {
+    const mm = window.matchMedia;
+    const res = /^\s*\(\s*(min-|max-)?(resolution|-webkit-(min-|max-)?device-pixel-ratio|-moz-device-pixel-ratio)\s*:\s*([\d.]+)\s*(dppx|dpi|dpcm|x)?\s*\)\s*$/i;
+    window.matchMedia = function (q) {
+      const m = res.exec(String(q));
+      if (!m) return mm.call(window, q);
+      const kind = (m[1] || m[3] || '').toLowerCase();
+      let v = parseFloat(m[4]);
+      const unit = (m[5] || '').toLowerCase();
+      if (unit === 'dpi') v /= 96; else if (unit === 'dpcm') v = v * 2.54 / 96;
+      const matches = kind === 'min-' ? 2 >= v : kind === 'max-' ? 2 <= v : Math.abs(2 - v) < 1e-6;
+      const noop = () => {};
+      return Object.create(typeof MediaQueryList !== 'undefined' ? MediaQueryList.prototype : Object.prototype, {
+        matches: { value: matches, enumerable: true }, media: { value: String(q), enumerable: true },
+        onchange: { value: null, writable: true }, addListener: { value: noop }, removeListener: { value: noop },
+        addEventListener: { value: noop }, removeEventListener: { value: noop }, dispatchEvent: { value: () => true },
+      });
+    };
+  } catch (e) {}
+  const STEP = 1000 / 60;
+  const coarse = (t) => Math.floor(t / STEP) * STEP;
+  try {
+    const pnow = Performance.prototype.now;
+    Performance.prototype.now = function () { return coarse(pnow.call(this)); };
+    const dnow = Date.now;
+    Date.now = function () { return Math.floor(coarse(dnow())); };
+    const ts = Object.getOwnPropertyDescriptor(Event.prototype, 'timeStamp');
+    if (ts && ts.get) def(Event.prototype, 'timeStamp', function () { return coarse(ts.get.call(this)); });
+  } catch (e) {}
+})();
+"#;
+
+extern "C" {
+    /// ICU's default-locale setter, linked in with Servo's JavaScript engine (ICU 78).
+    fn uloc_setDefault_78(locale: *const std::os::raw::c_char, status: *mut i32);
+}
+
+/// Makes the JavaScript engine use en-US (like Tor Browser) for `Intl`, `toLocaleString` and
+/// friends, instead of the PC's own language. Must run before any page code (page process).
+pub fn set_engine_locale_en_us() {
+    let mut status = 0i32;
+    unsafe { uloc_setDefault_78(c"en_US".as_ptr(), &mut status) };
 }
 
 /// Page clocks run on Tor Browser's timezone (Atlantic/Reykjavik = UTC+0, no daylight saving):
@@ -525,7 +628,7 @@ pub fn run_restricted_page_process() -> Option<u32> {
     };
     use windows_sys::Win32::System::Threading::{
         CreateProcessAsUserW, DeleteProcThreadAttributeList, GetExitCodeProcess, InitializeProcThreadAttributeList, ResumeThread,
-        UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
+        OpenProcess, UpdateProcThreadAttribute, WaitForMultipleObjects, WaitForSingleObject, CREATE_SUSPENDED, PROCESS_SYNCHRONIZE, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
         LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
     };
 
@@ -685,7 +788,20 @@ pub fn run_restricted_page_process() -> Option<u32> {
         AssignProcessToJobObject(job.0, pi.hProcess);
         ResumeThread(pi.hThread);
         CloseHandle(pi.hThread);
-        WaitForSingleObject(pi.hProcess, INFINITE);
+        // Wait for the page copy, or for the browser to go away (then the job closes with this
+        // launcher and takes the page copy with it).
+        let browser = std::env::var("RUSTWOLF_BROWSER_PID")
+            .ok()
+            .and_then(|p| p.parse::<u32>().ok())
+            .map(|pid| OpenProcess(PROCESS_SYNCHRONIZE, 0, pid))
+            .unwrap_or(std::ptr::null_mut());
+        if browser.is_null() {
+            WaitForSingleObject(pi.hProcess, INFINITE);
+        } else {
+            let both = [pi.hProcess, browser];
+            WaitForMultipleObjects(2, both.as_ptr(), 0, INFINITE);
+            CloseHandle(browser);
+        }
         let mut code = 1u32;
         GetExitCodeProcess(pi.hProcess, &mut code);
         CloseHandle(pi.hProcess);
