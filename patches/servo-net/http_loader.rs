@@ -1552,7 +1552,9 @@ async fn http_network_or_cache_fetch(
 
     // Step 8.21: If includeCredentials is true, then:
     // TODO some of this step can't be implemented yet
-    if include_credentials {
+    // RustWolf: no cookies for other sites embedded in the page (third-party cookie blocking).
+    let rustwolf_first_party = !crate::rustwolf::third_party(http_request, &current_url);
+    if include_credentials && rustwolf_first_party {
         // Substep 1
         // TODO http://mxr.mozilla.org/servo/source/components/net/http_loader.rs#504
         // XXXManishearth http_loader has block_cookies: support content blocking here too
@@ -2170,6 +2172,8 @@ async fn http_network_fetch(
 
     // Step 1: Let request be fetchParams’s request.
     let request = &mut fetch_params.request;
+    // RustWolf: third-party responses may not set cookies.
+    let rustwolf_third_party = crate::rustwolf::third_party(request, &request.current_url());
 
     // TODO Step 2. If request’s client is offline, then return a network error.
 
@@ -2475,7 +2479,7 @@ async fn http_network_fetch(
 
     // TODO this step isn't possible yet
     // Step 15
-    if credentials_flag {
+    if credentials_flag && !rustwolf_third_party {
         set_cookies_from_headers(&url, &response.headers, &context.state.cookie_jar);
     }
     context

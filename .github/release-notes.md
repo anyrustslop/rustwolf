@@ -1,7 +1,7 @@
 > [!WARNING]
 > **RustWolf is experimental and really unstable. It is not meant for daily use yet.**
 > It is built on Servo, a young web engine: many sites break or don't render fully, video doesn't play, and pages can crash.
-> It has not been security-audited, and Servo's page sandbox doesn't exist on Windows yet.
+> It has not been security-audited, and its page sandbox is much weaker than Firefox's or Chrome's.
 > For banking, email, shopping and anything important, use an established browser such as Firefox or LibreWolf.
 
 RustWolf is a privacy-first web browser **written in Rust**, built on the **Servo** web engine (also Rust).
@@ -16,10 +16,17 @@ The full source code is attached as **Source code (zip / tar.gz)**.
 ## Privacy
 - Ad, tracker and cookie-banner blocking (EasyList, EasyPrivacy, Fanboy's cookie list + RustWolf's own list) with Brave's Rust ad-block engine, including hiding empty ad boxes. Per-site shield switch with a live counter.
 - Malware & phishing shield: known dangerous sites are stopped before any connection is made.
-- Fingerprint resistance: uniform browser identity, language, CPU count, memory and screen size; canvas read-backs get invisible noise.
+- Fingerprint resistance: reports exactly what Tor Browser / Mullvad Browser report; canvas read-backs get invisible noise.
+- Third-party cookies blocked; every page runs in a sandboxed process.
 - HTTPS-only, tracking-link cleaning (`utm_*`, `fbclid`, `gclid`…), Global Privacy Control.
 - WebRTC, WebGL, WebGPU, location, notifications, Bluetooth and more are switched off; permission requests are denied.
 - Private by default: cookies, cache and history stay in memory and are forgotten when RustWolf closes. No telemetry.
+
+## New in 0.7
+- **Page sandbox:** every page process locks itself into a Windows job that forbids starting any program (a hacked page can't launch PowerShell or malware) and blocks clipboard, desktop and system-setting access, plus Windows exploit mitigations (no DLL injection, no DLLs from network shares, strict handle checks, and no executable-code creation in hardened mode).
+- **Third-party cookies blocked** (on by default, new switch in setup): ads and trackers embedded in pages get no cookies and can't set any. Done in Servo's network layer.
+- **Tor Browser crowd fingerprint:** RustWolf now reports exactly what Tor Browser 16 and Mullvad Browser report on Windows: Firefox 153 identity and HTTP headers, en-US, 4 cores, UTC (Atlantic/Reykjavik) timezone, touch points, Do Not Track, and Tor Browser's letterboxing steps (200 × 100 px, at most 1400 × 900).
+- Limits: the sandbox still runs pages with your user rights (no AppContainer yet), and deep fingerprint tests can still tell Servo apart.
 
 ## New in 0.6
 - **Automatic updates:** RustWolf downloads new versions in the background (through Tor when Tor is on), checks them against the release's SHA-256, and installs them when you click "Restart to update" or the next time you open it. The previous version is kept until the new one has started. (Coming from 0.5.x or older? Download this version once by hand; after that it updates itself.)

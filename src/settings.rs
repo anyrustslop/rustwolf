@@ -36,6 +36,8 @@ pub struct Settings {
     pub https_only: bool,
     /// No JIT / WebAssembly: closes the most-attacked part of the JavaScript engine.
     pub hardened: bool,
+    /// Cookies only for the site shown in the tab (no cookies for embedded trackers / ad frames).
+    pub block_3p_cookies: bool,
     /// Sites where third-party script files are blocked.
     pub no_3p_scripts: Vec<String>,
     // Privacy front-ends
@@ -67,6 +69,7 @@ impl Settings {
             clean_links: true,
             https_only: true,
             hardened: false,
+            block_3p_cookies: true,
             no_3p_scripts: Vec::new(),
             redirect_youtube: false,
             redirect_reddit: false,
@@ -87,6 +90,7 @@ impl Settings {
         self.clean_links = true;
         self.https_only = true;
         self.hardened = true;
+        self.block_3p_cookies = true;
     }
 
     pub fn recommended_protection(&mut self) {
@@ -100,10 +104,11 @@ impl Settings {
         self.clean_links = r.clean_links;
         self.https_only = r.https_only;
         self.hardened = r.hardened;
+        self.block_3p_cookies = r.block_3p_cookies;
     }
 
     pub fn is_strict(&self) -> bool {
-        self.block_ads && self.cookie_banners && self.annoyances && self.social && self.malware && self.fingerprint && self.clean_links && self.https_only && self.hardened
+        self.block_ads && self.cookie_banners && self.annoyances && self.social && self.malware && self.fingerprint && self.clean_links && self.https_only && self.hardened && self.block_3p_cookies
     }
 
     pub fn engine(&self) -> &'static SearchEngine {

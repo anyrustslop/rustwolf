@@ -3,7 +3,7 @@
 > [!WARNING]
 > **RustWolf is experimental and really unstable. It is not meant for daily use yet.**
 > It is built on Servo, a young web engine: many sites break or don't render fully, video doesn't play, and pages can crash.
-> It has not been security-audited, and Servo's page sandbox doesn't exist on Windows yet.
+> It has not been security-audited, and its page sandbox is much weaker than Firefox's or Chrome's.
 > For banking, email, shopping and anything important, use an established browser such as Firefox or LibreWolf.
 
 A privacy-first web browser **written in Rust**, built on **[Servo](https://servo.org)**, the web engine written in Rust.
@@ -25,7 +25,8 @@ The first time you open RustWolf it asks how you want to be protected (change it
 ## Privacy
 - **Ad, tracker and cookie-banner blocking** with Brave's Rust ad-block engine ([`adblock`](https://crates.io/crates/adblock)) and EasyList, EasyPrivacy and Fanboy's cookie list (downloaded on first start, refreshed weekly), plus RustWolf's own list. Empty ad boxes are hidden too (cosmetic filtering). Per-site shield switch with a live "blocked" counter and the list of blocked domains. Add your own lists in `%APPDATA%\RustWolf\filters.txt`.
 - **Malware & phishing shield:** known dangerous sites (URLhaus and phishing lists) are stopped before any connection is made, with a warning page.
-- **Fingerprint resistance:** every RustWolf reports the same common browser identity, language (en-US), CPU count, memory and platform; the screen is reported as the window size; canvas read-backs get invisible per-session noise.
+- **Third-party cookies blocked** (on by default): cookies only work for the site shown in the tab. Ads and trackers embedded in a page get no cookies and can't set any, so they can't follow you from site to site. Done in Servo's network layer.
+- **Fingerprint resistance, Tor Browser crowd:** RustWolf reports exactly what Tor Browser 16 and Mullvad Browser report on Windows (measured in Tor Browser itself): Firefox 153 identity and HTTP headers, en-US language, 4 CPU cores, the UTC (Atlantic/Reykjavik) timezone, touch points, Do Not Track, and the screen reported as the letterboxed window size. RustWolf's JavaScript engine is Firefox's own (SpiderMonkey), so the identity is consistent. Canvas read-backs get invisible per-session noise.
 - **HTTPS-only**, enforced in Servo's network layer (local addresses excepted).
 - **Clean links:** `utm_*`, `fbclid`, `gclid`, `msclkid` and other tracking parameters are removed from every page you open.
 - **Global Privacy Control** and Do Not Track signals.
@@ -47,10 +48,10 @@ RustWolf can't run browser extensions (Servo doesn't support them), so it talks 
 ## Safety & speed
 - **Hardened mode** (part of Strict): the JavaScript JIT compilers and WebAssembly are off, closing the most-attacked part of the engine.
 - **Per-site "block third-party scripts"** switch in the shield panel (scripts written into the page itself still run).
-- **Letterboxing:** with fingerprint protection on, the page size is rounded to 100 px steps so your window size can't identify you.
+- **Letterboxing:** with fingerprint protection on, the page size is rounded like in Tor Browser (200 px wide steps, 100 px tall steps, at most 1400 × 900) so your window size can't identify you.
 - **Automatic updates:** new versions download in the background (through Tor when Tor is on), are checked against the release's SHA-256, and install on "Restart to update" or the next start. The previous copy is kept until the new one runs.
 - **Verifiable releases:** every release has SHA-256 sums and signed build provenance (`gh attestation verify RustWolf-<version>-win64.exe --repo anyrustslop/rustwolf`), and every build runs a RustSec security audit of all dependencies.
-- **Each page runs in its own process**, so a bad page can't reach the browser.
+- **Each page runs in its own sandboxed process:** every page process locks itself into a Windows job that forbids starting any program (a hacked page can't launch PowerShell or malware) and blocks clipboard, desktop and system-setting access, and turns on Windows exploit mitigations (no DLL injection through extension points, no DLLs from network shares or untrusted files, strict handle checks; in hardened mode no creation of executable code at all).
 - **Memory guard:** a page process using more than 2 GB (less on PCs with under 12 GB of RAM) is stopped within a quarter of a second (only that page); Windows caps every RustWolf process too, so one heavy site can never freeze your PC.
 - RustWolf runs below normal priority, so your other apps always stay responsive. Background tabs are throttled.
 
@@ -60,12 +61,13 @@ Tabs (middle-click to close), address bar that also searches with DuckDuckGo, ba
 ## Limits (Servo is still young)
 - No video/audio playback yet on Windows, no DRM (Netflix, Spotify Web, Disney+), no browser extensions.
 - Some complex sites render incorrectly (YouTube's video grid, for example); dropdowns and page dialogs are basic.
-- Third-party cookies aren't separated per site yet (they are all forgotten when RustWolf closes).
-- Servo's page-process sandbox doesn't exist on Windows yet; pages are isolated in separate processes but not locked down like in Firefox.
+- Third-party cookies are blocked at the network level, but JavaScript inside a third-party frame can still use `document.cookie` (it is forgotten when RustWolf closes).
+- The page sandbox is weaker than Firefox's or Chrome's: page processes can't start programs, but they still run with your user rights (no low-integrity / AppContainer sandbox yet), so they could read your files if the engine were hacked.
+- The fingerprint matches Tor Browser for the values sites usually check, but deep tests (rendering details, fonts, engine quirks) can still tell Servo apart.
 
 ## Build
 `cargo build --release` (Rust 1.88+, MSVC + Windows SDK). Servo's JavaScript engine (SpiderMonkey) is downloaded prebuilt by the `mozjs_sys` crate.
-`patches/servo-net` is Servo's network crate with one change: a 256 KB HTTP/2 header limit (instead of 16 KB) so YouTube and other Google sites load.
+`patches/servo-net` is Servo's network crate with RustWolf's changes: a 256 KB HTTP/2 header limit (instead of 16 KB) so YouTube and other Google sites load, third-party cookie blocking and Firefox-identical request headers ([rustwolf.rs](patches/servo-net/rustwolf.rs)).
 
 ## License
 MPL-2.0. `src/keyutils.rs` and `patches/servo-net` come from Servo (MPL-2.0).

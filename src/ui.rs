@@ -558,8 +558,9 @@ pub fn draw(root: &mut egui::Ui, st: &mut UiState, tabs: &[Tab], active: usize, 
         // Letterboxing: the page gets a size rounded to 100 px steps, so your exact window size
         // can't be used to recognise you (like Tor Browser / Mullvad Browser).
         if settings.fingerprint && tab.webview.is_some() {
-            let w = ((page.width() / 100.0).floor() * 100.0).max(200.0).min(page.width());
-            let h = ((page.height() / 100.0).floor() * 100.0).max(200.0).min(page.height());
+            // Same steps as Tor Browser: width in 200 px steps, height in 100 px steps, at most 1400 × 900.
+            let w = ((page.width() / 200.0).floor() * 200.0).clamp(200.0, 1400.0).min(page.width());
+            let h = ((page.height() / 100.0).floor() * 100.0).clamp(200.0, 900.0).min(page.height());
             page = Rect::from_center_size(page.center(), vec2(w, h));
         }
         if let (None, Some(n)) = (&tab.webview, &tab.notice) {

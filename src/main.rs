@@ -463,6 +463,8 @@ impl Browser {
         prefs.js_mem_max = 1536; // MB of JavaScript heap per page
         // Privacy lockdown of the engine itself.
         let user_settings = settings::Settings::load();
+        net::rustwolf::set_block_third_party_cookies(user_settings.block_3p_cookies);
+        net::rustwolf::set_firefox_headers(user_settings.fingerprint);
         prefs.network_enforce_tls_enabled = user_settings.https_only; // HTTPS-only (local addresses excepted)
         // Pages may use copy buttons; every page-made copy goes through the ClickFix guard.
         prefs.dom_async_clipboard_enabled = true;
@@ -807,6 +809,8 @@ impl Browser {
                     self.ui.restart_needed = true;
                 }
                 let lists_changed = new.cookie_banners != old.cookie_banners || new.annoyances != old.annoyances || new.social != old.social;
+                net::rustwolf::set_block_third_party_cookies(new.block_3p_cookies);
+                net::rustwolf::set_firefox_headers(new.fingerprint);
                 *self.shared.settings.borrow_mut() = (*new).clone();
                 if lists_changed {
                     load_lists(self.lists_tx.clone(), self.proxy.clone(), *new, self.tor.as_ref().map(|t| t.progress.clone()));
@@ -1396,6 +1400,10 @@ fn main() {
     if args.len() >= 3 && args[1] == "--content-process" {
         // A page process started by Servo.
         lower_priority();
+        guard::lockdown_content_process(settings::Settings::load().hardened);
+        if std::env::var_os("RUSTWOLF_SANDBOX_TEST").is_some() {
+            eprintln!("[sandbox] page process can start programs: {}", !guard::job_forbids_child_processes());
+        }
         servo::run_content_process(args[2].clone());
         return;
     }
@@ -1404,6 +1412,10 @@ fn main() {
     updater::cleanup_old();
     if updater::install_and_relaunch(&args[1..]) {
         return;
+    }
+    // Tor Browser's timezone for the engine (page processes inherit it).
+    if settings::Settings::load().fingerprint {
+        std::env::set_var("TZ", guard::TIMEZONE);
     }
     lower_priority();
     guard::hard_memory_cap();
