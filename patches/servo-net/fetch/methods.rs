@@ -253,6 +253,7 @@ pub async fn fetch(request: Request, target: Target<'_>, context: &FetchContext)
     // append (`Accept-Language, an appropriate header value) to request’s header list.
     set_default_accept_language(&mut request.headers);
     crate::rustwolf::adjust_request_headers(request);
+    crate::rustwolf::note_navigation(request, &request.current_url());
 
     // Step 15. If request’s internal priority is null, then use request’s priority, initiator,
     // destination, and render-blocking in an implementation-defined manner to set request’s

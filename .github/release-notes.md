@@ -1,7 +1,7 @@
 > [!WARNING]
 > **RustWolf is experimental and really unstable. It is not meant for daily use yet.**
 > It is built on Servo, a young web engine: many sites break or don't render fully, video doesn't play, and pages can crash.
-> It has not been security-audited, and its page sandbox is much weaker than Firefox's or Chrome's.
+> It has not been security-audited, and its page sandbox is new and simpler than Firefox's or Chrome's.
 > For banking, email, shopping and anything important, use an established browser such as Firefox or LibreWolf.
 
 RustWolf is a privacy-first web browser **written in Rust**, built on the **Servo** web engine (also Rust).
@@ -17,10 +17,15 @@ The full source code is attached as **Source code (zip / tar.gz)**.
 - Ad, tracker and cookie-banner blocking (EasyList, EasyPrivacy, Fanboy's cookie list + RustWolf's own list) with Brave's Rust ad-block engine, including hiding empty ad boxes. Per-site shield switch with a live counter.
 - Malware & phishing shield: known dangerous sites are stopped before any connection is made.
 - Fingerprint resistance: reports exactly what Tor Browser / Mullvad Browser report; canvas read-backs get invisible noise.
-- Third-party cookies blocked; every page runs in a sandboxed process.
+- Third-party cookies and storage blocked; every page runs in a low-rights sandboxed process.
 - HTTPS-only, tracking-link cleaning (`utm_*`, `fbclid`, `gclid`…), Global Privacy Control.
 - WebRTC, WebGL, WebGPU, location, notifications, Bluetooth and more are switched off; permission requests are denied.
 - Private by default: cookies, cache and history stay in memory and are forgotten when RustWolf closes. No telemetry.
+
+## New in 0.8.1
+- **Real page sandbox:** every page now runs in a locked-down copy of its process: your Windows account is switched off in its token, it runs at Low integrity with no privileges. A page that hacked the engine couldn't open your files or registry, couldn't write anywhere and couldn't touch your other programs or the browser process (on top of 0.7's no-programs job and exploit mitigations).
+- **Third-party storage partitioned:** a site embedded in another site's page (tracker, ad frame) gets a separate, empty `localStorage` / `sessionStorage` on every site, an empty `document.cookie`, and no Cache Storage.
+- Limits: a hacked page process could still open network connections itself, and page processes can pass engine handles to each other. Script cookies of an embedded site are only blocked while that site isn't open in one of your tabs.
 
 ## New in 0.7
 - **Page sandbox:** every page process locks itself into a Windows job that forbids starting any program (a hacked page can't launch PowerShell or malware) and blocks clipboard, desktop and system-setting access, plus Windows exploit mitigations (no DLL injection, no DLLs from network shares, strict handle checks, and no executable-code creation in hardened mode).

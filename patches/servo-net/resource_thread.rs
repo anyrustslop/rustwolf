@@ -502,17 +502,24 @@ impl ResourceChannelManager {
                 )
             },
             CoreResourceMsg::SetCookieForUrl(request, cookie, source, sender) => {
-                self.resource_manager.set_cookie_for_url(
-                    &request,
-                    cookie.into_inner().to_owned(),
-                    source,
-                    http_state,
-                );
+                if crate::rustwolf::script_cookies_allowed(&request, source) {
+                    self.resource_manager.set_cookie_for_url(
+                        &request,
+                        cookie.into_inner().to_owned(),
+                        source,
+                        http_state,
+                    );
+                }
                 if let Some(sender) = sender {
                     let _ = sender.send(());
                 }
             },
             CoreResourceMsg::SetCookiesForUrl(request, cookies, source) => {
+                let cookies = if crate::rustwolf::script_cookies_allowed(&request, source) {
+                    cookies
+                } else {
+                    vec![]
+                };
                 for cookie in cookies {
                     self.resource_manager.set_cookie_for_url(
                         &request,
@@ -523,18 +530,30 @@ impl ResourceChannelManager {
                 }
             },
             CoreResourceMsg::SetCookieForUrlAsync(cookie_store_id, url, cookie, source) => {
-                self.resource_manager.set_cookie_for_url(
-                    &url,
-                    cookie.into_inner().to_owned(),
-                    source,
-                    http_state,
-                );
+                if crate::rustwolf::script_cookies_allowed(&url, CookieSource::NonHTTP) {
+                    self.resource_manager.set_cookie_for_url(
+                        &url,
+                        cookie.into_inner().to_owned(),
+                        source,
+                        http_state,
+                    );
+                }
                 self.send_cookie_response(cookie_store_id, CookieData::Set(Ok(())));
+            },
+            CoreResourceMsg::GetCookieStringForUrl(url, consumer, source)
+                if !crate::rustwolf::script_cookies_allowed(&url, source) =>
+            {
+                consumer.send_or_ignore(None);
             },
             CoreResourceMsg::GetCookieStringForUrl(url, consumer, source) => {
                 let mut cookie_jar = http_state.cookie_jar.write();
                 cookie_jar.remove_expired_cookies_for_url(&url);
                 consumer.send_or_ignore(cookie_jar.cookies_for_url(&url, source));
+            },
+            CoreResourceMsg::GetCookiesForUrl(url, consumer, source)
+                if !crate::rustwolf::script_cookies_allowed(&url, source) =>
+            {
+                consumer.send_or_ignore(vec![]);
             },
             CoreResourceMsg::GetCookiesForUrl(url, consumer, source) => {
                 let mut cookie_jar = http_state.cookie_jar.write();
@@ -545,6 +564,11 @@ impl ResourceChannelManager {
                     .collect();
                 consumer.send_or_ignore(cookies);
             },
+            CoreResourceMsg::GetCookieDataForUrlAsync(cookie_store_id, url, _name)
+                if !crate::rustwolf::script_cookies_allowed(&url, CookieSource::NonHTTP) =>
+            {
+                self.send_cookie_response(cookie_store_id, CookieData::Get(None));
+            },
             CoreResourceMsg::GetCookieDataForUrlAsync(cookie_store_id, url, name) => {
                 let mut cookie_jar = http_state.cookie_jar.write();
                 cookie_jar.remove_expired_cookies_for_url(&url);
@@ -554,6 +578,11 @@ impl ResourceChannelManager {
                     .map(Serde)
                     .next();
                 self.send_cookie_response(cookie_store_id, CookieData::Get(cookie));
+            },
+            CoreResourceMsg::GetAllCookieDataForUrlAsync(cookie_store_id, url, _name)
+                if !crate::rustwolf::script_cookies_allowed(&url, CookieSource::NonHTTP) =>
+            {
+                self.send_cookie_response(cookie_store_id, CookieData::GetAll(vec![]));
             },
             CoreResourceMsg::GetAllCookieDataForUrlAsync(cookie_store_id, url, name) => {
                 let mut cookie_jar = http_state.cookie_jar.write();

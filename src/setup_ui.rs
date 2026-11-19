@@ -218,7 +218,7 @@ fn protection(ui: &mut egui::Ui, st: &mut UiState) {
     toggle_row(ui, &mut d.fingerprint, "Fingerprint protection", "Reports exactly the same values as Tor Browser and Mullvad Browser (browser identity, language, timezone, screen size) so you blend into their crowd.");
     toggle_row(ui, &mut d.clean_links, "Clean tracking links", "Removes utm_, fbclid, gclid and other trackers from links you open.");
     toggle_row(ui, &mut d.https_only, "HTTPS-only", "Always use encrypted connections. (Applies fully after restarting RustWolf.)");
-    toggle_row(ui, &mut d.block_3p_cookies, "Block third-party cookies", "Cookies only work for the site you're on. Trackers and ads embedded in pages can't use cookies to follow you from site to site.");
+    toggle_row(ui, &mut d.block_3p_cookies, "Block third-party cookies & storage", "Cookies and site storage only work for the site you're on. Trackers and ads embedded in pages get a separate, empty storage on every site, so they can't follow you from site to site.");
     toggle_row(ui, &mut d.hardened, "Hardened mode", "Turns off the JavaScript JIT compiler and WebAssembly, where most browser exploits happen. Heavy sites get slower. (Applies after restarting RustWolf.)");
 }
 
@@ -256,7 +256,7 @@ fn summary(ui: &mut egui::Ui, st: &mut UiState) {
         (d.clean_links, "Tracking links cleaned"),
         (d.https_only, "HTTPS-only"),
         (d.hardened, "Hardened mode (no JIT)"),
-        (d.block_3p_cookies, "Third-party cookies blocked"),
+        (d.block_3p_cookies, "Third-party cookies & storage blocked"),
         (d.redirect_reddit, "Reddit → Redlib"),
         (d.redirect_youtube, "YouTube → Invidious"),
         (d.tor, "All traffic through Tor"),

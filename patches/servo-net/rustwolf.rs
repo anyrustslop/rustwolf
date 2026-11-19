@@ -3,22 +3,19 @@
 //! - Third-party cookie blocking: cookies are only sent to / accepted from the site shown in the
 //!   tab (the top-level site). Requests to other sites embedded in the page (trackers, ad iframes)
 //!   go out without cookies and can't set any.
+//! - Script cookies (`document.cookie`, Cookie Store) only for sites open in a tab, so an embedded
+//!   tracker can't use them either (see the `rustwolf-shared` crate).
 //! - Firefox / Tor Browser identical headers, so RustWolf blends into that crowd.
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{LazyLock, RwLock};
 
 use http::header::{self, HeaderValue};
-use net_traits::pub_domains::reg_suffix;
 use net_traits::request::{Destination, Request};
-use servo_base::id::WebViewId;
+use net_traits::CookieSource;
 use servo_url::ServoUrl;
 
 static BLOCK_THIRD_PARTY_COOKIES: AtomicBool = AtomicBool::new(true);
 static FIREFOX_HEADERS: AtomicBool = AtomicBool::new(true);
-/// Top-level site of each tab, learned from its main-frame (document) requests.
-static TOP_LEVEL: LazyLock<RwLock<HashMap<WebViewId, String>>> = LazyLock::new(Default::default);
 
 pub fn set_block_third_party_cookies(on: bool) {
     BLOCK_THIRD_PARTY_COOKIES.store(on, Ordering::Relaxed);
@@ -28,24 +25,27 @@ pub fn set_firefox_headers(on: bool) {
     FIREFOX_HEADERS.store(on, Ordering::Relaxed);
 }
 
-fn site(url: &ServoUrl) -> Option<String> {
-    url.host_str().map(|h| reg_suffix(h).to_ascii_lowercase())
+/// A top-level navigation (main frame of a tab): remember that tab's site.
+pub(crate) fn note_navigation(request: &Request, url: &ServoUrl) {
+    if let (Destination::Document, Some(id)) = (request.destination, request.target_webview_id) {
+        rustwolf_shared::note_top_level(id, url);
+    }
 }
 
 /// True when this request goes to a different site than the one shown in its tab.
 pub(crate) fn third_party(request: &Request, url: &ServoUrl) -> bool {
-    if !BLOCK_THIRD_PARTY_COOKIES.load(Ordering::Relaxed) {
+    note_navigation(request, url);
+    if !BLOCK_THIRD_PARTY_COOKIES.load(Ordering::Relaxed) || request.destination == Destination::Document {
         return false;
     }
-    let (Some(id), Some(s)) = (request.target_webview_id, site(url)) else { return false };
-    if request.destination == Destination::Document {
-        // A top-level navigation: this is now the tab's site.
-        if let Ok(mut map) = TOP_LEVEL.write() {
-            map.insert(id, s);
-        }
-        return false;
-    }
-    TOP_LEVEL.read().ok().and_then(|m| m.get(&id).cloned()).is_some_and(|top| top != s)
+    let (Some(id), Some(s)) = (request.target_webview_id, rustwolf_shared::site_of_url(url)) else { return false };
+    rustwolf_shared::top_site(id).is_some_and(|top| top != s)
+}
+
+/// May a page's script read / write cookies for this URL? Not when the site isn't open in any tab
+/// (it's only embedded in other sites' pages: a tracker).
+pub(crate) fn script_cookies_allowed(url: &ServoUrl, source: CookieSource) -> bool {
+    source == CookieSource::HTTP || rustwolf_shared::url_open_in_a_tab(url)
 }
 
 /// Same `Accept-Language` and image `Accept` values as Firefox with resist-fingerprinting

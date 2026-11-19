@@ -1,0 +1,16 @@
+[package]
+name = "rustwolf-shared"
+version = "0.1.0"
+edition = "2021"
+license = "MPL-2.0"
+description = "State shared between RustWolf and its patched Servo crates (which site each tab shows)."
+publish = false
+
+[lib]
+path = "lib.rs"
+
+[dependencies]
+net_traits = { package = "servo-net-traits", version = "=0.8.0" }
+servo-base = "=0.8.0"
+servo-url = "=0.8.0"
+url = "2.5"

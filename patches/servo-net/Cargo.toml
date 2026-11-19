@@ -404,3 +404,6 @@ check-cfg = [
     "cfg(llvm_pgo)",
     "cfg(ohos_mock)",
 ]
+
+[dependencies.rustwolf-shared]
+path = "../rustwolf-shared"

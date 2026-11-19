@@ -464,6 +464,7 @@ impl Browser {
         // Privacy lockdown of the engine itself.
         let user_settings = settings::Settings::load();
         net::rustwolf::set_block_third_party_cookies(user_settings.block_3p_cookies);
+        rustwolf_shared::set_partitioning(user_settings.block_3p_cookies);
         net::rustwolf::set_firefox_headers(user_settings.fingerprint);
         prefs.network_enforce_tls_enabled = user_settings.https_only; // HTTPS-only (local addresses excepted)
         // Pages may use copy buttons; every page-made copy goes through the ClickFix guard.
@@ -677,6 +678,9 @@ impl Browser {
             }
             Action::CloseTab(i) => {
                 if i < self.tabs.len() {
+                    if let Some(w) = &self.tabs[i].webview {
+                        rustwolf_shared::forget_tab(w.id());
+                    }
                     self.tabs.remove(i); // dropping the WebView closes the page
                     if self.tabs.is_empty() {
                         self.tabs.push(Tab::blank());
@@ -810,6 +814,7 @@ impl Browser {
                 }
                 let lists_changed = new.cookie_banners != old.cookie_banners || new.annoyances != old.annoyances || new.social != old.social;
                 net::rustwolf::set_block_third_party_cookies(new.block_3p_cookies);
+                rustwolf_shared::set_partitioning(new.block_3p_cookies);
                 net::rustwolf::set_firefox_headers(new.fingerprint);
                 *self.shared.settings.borrow_mut() = (*new).clone();
                 if lists_changed {
@@ -1397,12 +1402,31 @@ fn lower_priority() {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    // Pipe permissions for the engine's processes (inherited by every page process).
+    guard::set_pipe_security();
     if args.len() >= 3 && args[1] == "--content-process" {
         // A page process started by Servo.
         lower_priority();
-        guard::lockdown_content_process(settings::Settings::load().hardened);
+        let hardened = if std::env::var_os("RUSTWOLF_PAGE_SANDBOXED").is_some() {
+            // The locked-down copy: it can't read RustWolf's settings, its launcher passes them.
+            std::env::var("RUSTWOLF_HARDENED").is_ok_and(|v| v == "1")
+        } else {
+            let hardened = settings::Settings::load().hardened;
+            std::env::set_var("RUSTWOLF_HARDENED", if hardened { "1" } else { "0" });
+            std::env::set_var("RUSTWOLF_PAGE_SANDBOXED", "1");
+            std::env::set_var("RUSTWOLF_LAUNCHER_PID", std::process::id().to_string());
+            if let Some(code) = guard::run_restricted_page_process() {
+                std::process::exit(code as i32);
+            }
+            std::env::remove_var("RUSTWOLF_PAGE_SANDBOXED");
+            std::env::remove_var("RUSTWOLF_LAUNCHER_PID");
+            hardened
+        };
+        guard::lockdown_content_process(hardened);
         if std::env::var_os("RUSTWOLF_SANDBOX_TEST").is_some() {
+            eprintln!("[sandbox] restricted copy: {}", std::env::var_os("RUSTWOLF_PAGE_SANDBOXED").is_some());
             eprintln!("[sandbox] page process can start programs: {}", !guard::job_forbids_child_processes());
+            eprintln!("[sandbox] page process can read your files: {}", guard::can_read_user_files());
         }
         servo::run_content_process(args[2].clone());
         return;

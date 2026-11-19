@@ -211,24 +211,23 @@ fn process_ram_mb(pid: u32) -> Option<u64> {
     }
 }
 
-/// RustWolf's page processes (children of this process).
+/// RustWolf's page processes: children of this process and, with the restricted sandbox, their
+/// locked-down copies (grandchildren), which is where the page really runs.
 fn page_processes() -> Vec<u32> {
     use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
     let me = std::process::id();
-    let mut out = Vec::new();
+    let mut all = Vec::new();
     unsafe {
         let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
         if snap == INVALID_HANDLE_VALUE {
-            return out;
+            return Vec::new();
         }
         let mut e: PROCESSENTRY32W = std::mem::zeroed();
         e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
         if Process32FirstW(snap, &mut e) != 0 {
             loop {
-                if e.th32ParentProcessID == me {
-                    out.push(e.th32ProcessID);
-                }
+                all.push((e.th32ProcessID, e.th32ParentProcessID));
                 if Process32NextW(snap, &mut e) == 0 {
                     break;
                 }
@@ -236,6 +235,9 @@ fn page_processes() -> Vec<u32> {
         }
         CloseHandle(snap);
     }
+    let children: Vec<u32> = all.iter().filter(|(_, parent)| *parent == me).map(|(pid, _)| *pid).collect();
+    let mut out = children.clone();
+    out.extend(all.iter().filter(|(_, parent)| children.contains(parent)).map(|(pid, _)| *pid));
     out
 }
 
@@ -412,4 +414,286 @@ pub fn lockdown_content_process(hardened: bool) {
 /// Is this process really locked down? (Used by the tests and the shield panel.)
 pub fn job_forbids_child_processes() -> bool {
     std::process::Command::new("cmd.exe").arg("/c").arg("exit").spawn().is_err()
+}
+
+// ---------------------------------------------------------------- restricted page processes
+
+const SE_GROUP_INTEGRITY: u32 = 0x20;
+const SE_GROUP_LOGON_ID: u32 = 0xC000_0000;
+
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain(Some(0)).collect()
+}
+
+/// Closes a Windows handle when dropped.
+struct Owned(windows_sys::Win32::Foundation::HANDLE);
+impl Drop for Owned {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0) };
+        }
+    }
+}
+
+fn own_token(access: u32) -> Option<Owned> {
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    let mut t = std::ptr::null_mut();
+    unsafe { (OpenProcessToken(GetCurrentProcess(), access, &mut t) != 0).then_some(Owned(t)) }
+}
+
+unsafe fn token_info(tok: &Owned, class: windows_sys::Win32::Security::TOKEN_INFORMATION_CLASS) -> Option<Vec<u64>> {
+    use windows_sys::Win32::Security::GetTokenInformation;
+    let mut len = 0u32;
+    GetTokenInformation(tok.0, class, std::ptr::null_mut(), 0, &mut len);
+    if len == 0 {
+        return None;
+    }
+    let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+    (GetTokenInformation(tok.0, class, buf.as_mut_ptr() as _, len, &mut len) != 0).then_some(buf)
+}
+
+unsafe fn sid_string(sid: windows_sys::Win32::Security::PSID) -> Option<String> {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::ConvertSidToStringSidW;
+    let mut p: windows_sys::core::PWSTR = std::ptr::null_mut();
+    if ConvertSidToStringSidW(sid, &mut p) == 0 {
+        return None;
+    }
+    let mut n = 0;
+    while *p.add(n) != 0 {
+        n += 1;
+    }
+    let s = String::from_utf16_lossy(std::slice::from_raw_parts(p, n));
+    LocalFree(p as _);
+    Some(s)
+}
+
+/// (your user account's SID, your logon session's SID).
+fn user_and_logon_sids(tok: &Owned) -> Option<(String, String)> {
+    use windows_sys::Win32::Security::{TokenGroups, TokenUser, TOKEN_GROUPS, TOKEN_USER};
+    unsafe {
+        let u = token_info(tok, TokenUser)?;
+        let user = &*(u.as_ptr() as *const TOKEN_USER);
+        let g = token_info(tok, TokenGroups)?;
+        let groups = &*(g.as_ptr() as *const TOKEN_GROUPS);
+        let list = std::slice::from_raw_parts(groups.Groups.as_ptr(), groups.GroupCount as usize);
+        let logon = list.iter().find(|x| x.Attributes & SE_GROUP_LOGON_ID == SE_GROUP_LOGON_ID)?;
+        Some((sid_string(user.User.Sid)?, sid_string(logon.Sid)?))
+    }
+}
+
+/// Permissions for the pipes Servo's processes talk through (applied by RustWolf's ipc-channel
+/// patch): only SYSTEM, you and your current logon session, labelled Low integrity so the
+/// restricted page processes (which keep only the logon session) can connect.
+pub fn set_pipe_security() {
+    use windows_sys::Win32::Security::TOKEN_QUERY;
+    if std::env::var_os("RUSTWOLF_PIPE_SDDL").is_some() {
+        return;
+    }
+    if let Some((user, logon)) = own_token(TOKEN_QUERY).as_ref().and_then(user_and_logon_sids) {
+        std::env::set_var("RUSTWOLF_PIPE_SDDL", format!("D:P(A;;GA;;;SY)(A;;GA;;;{user})(A;;GA;;;{logon})S:(ML;;NW;;;LW)"));
+    }
+}
+
+/// The real page-process sandbox. The page process Servo starts re-launches itself as a
+/// locked-down copy and waits for it (the page runs in the copy):
+/// - your Windows account is switched off in its token ("deny only"), so it can't open your
+///   files, documents, browser data or registry settings;
+/// - it runs at Low integrity: it can't write anywhere you can, or touch your other programs;
+/// - all its privileges are removed;
+/// - it is tied to its launcher with a job, so it never outlives it.
+///
+/// Returns the copy's exit code, or None if the copy couldn't be started (then the caller runs
+/// the page itself with the job + mitigation sandbox only).
+pub fn run_restricted_page_process() -> Option<u32> {
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetHandleInformation, GetLastError, LocalFree, HANDLE, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, ConvertStringSidToSidW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        CreateRestrictedToken, GetLengthSid, GetSecurityDescriptorDacl, SetTokenInformation, TokenDefaultDacl, TokenIntegrityLevel,
+        TokenUser, DISABLE_MAX_PRIVILEGE, PSECURITY_DESCRIPTOR, PSID, SID_AND_ATTRIBUTES, TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY,
+        SECURITY_ATTRIBUTES, TOKEN_DEFAULT_DACL, TOKEN_DUPLICATE, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER,
+    };
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE, STD_OUTPUT_HANDLE};
+    use windows_sys::Win32::System::Environment::GetCommandLineW;
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation, SetInformationJobObject,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessAsUserW, DeleteProcThreadAttributeList, GetExitCodeProcess, InitializeProcThreadAttributeList, ResumeThread,
+        UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
+        LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    };
+
+    if std::env::var_os("RUSTWOLF_PIPE_SDDL").is_none() || std::env::var_os("RUSTWOLF_NO_SANDBOX").is_some() {
+        return None;
+    }
+    let fail = |what: &str| {
+        eprintln!("[sandbox] restricted page process not available ({what}, error {})", unsafe { GetLastError() });
+        None
+    };
+    unsafe {
+        let tok = own_token(TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY | TOKEN_ADJUST_DEFAULT)?;
+        let (user_s, logon_s) = user_and_logon_sids(&tok)?;
+        let u = token_info(&tok, TokenUser)?;
+        let user = &*(u.as_ptr() as *const TOKEN_USER);
+
+        // Token with your account switched off and no privileges.
+        let disable = [SID_AND_ATTRIBUTES { Sid: user.User.Sid, Attributes: 0 }];
+        let mut rt: HANDLE = std::ptr::null_mut();
+        if CreateRestrictedToken(tok.0, DISABLE_MAX_PRIVILEGE, 1, disable.as_ptr(), 0, std::ptr::null(), 0, std::ptr::null(), &mut rt) == 0 {
+            return fail("restricted token");
+        }
+        let rt = Owned(rt);
+
+        // Low integrity.
+        let mut low: PSID = std::ptr::null_mut();
+        if ConvertStringSidToSidW(wide("S-1-16-4096").as_ptr(), &mut low) == 0 {
+            return fail("low SID");
+        }
+        let label = TOKEN_MANDATORY_LABEL { Label: SID_AND_ATTRIBUTES { Sid: low, Attributes: SE_GROUP_INTEGRITY } };
+        let ok = SetTokenInformation(
+            rt.0,
+            TokenIntegrityLevel,
+            &label as *const _ as _,
+            std::mem::size_of::<TOKEN_MANDATORY_LABEL>() as u32 + GetLengthSid(low),
+        );
+        LocalFree(low as _);
+        if ok == 0 {
+            return fail("low integrity");
+        }
+
+        // Objects it creates (its pipes, its own process) stay reachable by the browser.
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let sddl = wide(&format!("D:(A;;GA;;;SY)(A;;GA;;;{user_s})(A;;GA;;;{logon_s})"));
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, std::ptr::null_mut()) == 0 {
+            return fail("default DACL");
+        }
+        let (mut present, mut defaulted, mut dacl) = (0, 0, std::ptr::null_mut());
+        GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted);
+        let dd = TOKEN_DEFAULT_DACL { DefaultDacl: dacl };
+        let ok = SetTokenInformation(rt.0, TokenDefaultDacl, &dd as *const _ as _, std::mem::size_of::<TOKEN_DEFAULT_DACL>() as u32);
+        LocalFree(sd as _);
+        if ok == 0 {
+            return fail("set default DACL");
+        }
+
+        // Its process object: you and SYSTEM keep full control; other page processes (which only
+        // have the logon session) may only pass engine IPC handles to / from it, nothing else.
+        // 0x101040 = SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_DUP_HANDLE.
+        let mut psd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let psddl = wide(&format!("D:(A;;GA;;;SY)(A;;GA;;;{user_s})(A;;0x101040;;;{logon_s})"));
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(psddl.as_ptr(), SDDL_REVISION_1, &mut psd, std::ptr::null_mut()) == 0 {
+            return fail("process DACL");
+        }
+        struct FreeSd(PSECURITY_DESCRIPTOR);
+        impl Drop for FreeSd {
+            fn drop(&mut self) {
+                unsafe { windows_sys::Win32::Foundation::LocalFree(self.0 as _) };
+            }
+        }
+        let psd = FreeSd(psd);
+        let process_sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: psd.0,
+            bInheritHandle: 0,
+        };
+
+        // The copy dies with its launcher.
+        let job = Owned(CreateJobObjectW(std::ptr::null(), std::ptr::null()));
+        if job.0.is_null() {
+            return fail("job");
+        }
+        let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(job.0, JobObjectExtendedLimitInformation, &info as *const _ as _, std::mem::size_of_val(&info) as u32);
+
+        // Only the console / log handles are passed on (nothing else is inherited).
+        let mut handles: Vec<HANDLE> = Vec::new();
+        let mut std_handle = |which| {
+            let h = GetStdHandle(which);
+            let mut flags = 0u32;
+            if !h.is_null() && h != INVALID_HANDLE_VALUE && GetHandleInformation(h, &mut flags) != 0 && flags & HANDLE_FLAG_INHERIT != 0 {
+                if !handles.contains(&h) {
+                    handles.push(h);
+                }
+                h
+            } else {
+                std::ptr::null_mut()
+            }
+        };
+        let (out, err) = (std_handle(STD_OUTPUT_HANDLE), std_handle(STD_ERROR_HANDLE));
+        let mut size = 0usize;
+        InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size);
+        let mut attr_buf = vec![0u64; size / 8 + 1];
+        let attrs = attr_buf.as_mut_ptr() as LPPROC_THREAD_ATTRIBUTE_LIST;
+        let have_attrs = InitializeProcThreadAttributeList(attrs, 1, 0, &mut size) != 0;
+        let inherit = have_attrs
+            && !handles.is_empty()
+            && UpdateProcThreadAttribute(
+                attrs,
+                0,
+                PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize,
+                handles.as_ptr() as _,
+                handles.len() * std::mem::size_of::<HANDLE>(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            ) != 0;
+        let mut si: STARTUPINFOEXW = std::mem::zeroed();
+        si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        if inherit {
+            si.lpAttributeList = attrs;
+            si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+            si.StartupInfo.hStdOutput = out;
+            si.StartupInfo.hStdError = err;
+        }
+
+        let Some(exe) = std::env::current_exe().ok().and_then(|p| p.to_str().map(wide)) else { return fail("exe path") };
+        let cl = GetCommandLineW();
+        let mut n = 0;
+        while *cl.add(n) != 0 {
+            n += 1;
+        }
+        let mut cmd: Vec<u16> = std::slice::from_raw_parts(cl, n).to_vec();
+        cmd.push(0);
+        let cwd = wide(&format!("{}\\System32", std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into())));
+        let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+        let flags = CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT;
+        let ok = CreateProcessAsUserW(
+            rt.0,
+            exe.as_ptr(),
+            cmd.as_mut_ptr(),
+            &process_sa,
+            std::ptr::null(),
+            inherit as i32,
+            flags,
+            std::ptr::null(),
+            cwd.as_ptr(),
+            &si.StartupInfo,
+            &mut pi,
+        );
+        if have_attrs {
+            DeleteProcThreadAttributeList(attrs);
+        }
+        if ok == 0 {
+            return fail("start");
+        }
+        AssignProcessToJobObject(job.0, pi.hProcess);
+        ResumeThread(pi.hThread);
+        CloseHandle(pi.hThread);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        let mut code = 1u32;
+        GetExitCodeProcess(pi.hProcess, &mut code);
+        CloseHandle(pi.hProcess);
+        Some(code)
+    }
+}
+
+/// Can this process read the user's own files? (Sandbox self-test.)
+pub fn can_read_user_files() -> bool {
+    std::env::var_os("USERPROFILE").is_some_and(|p| std::fs::read_dir(p).is_ok())
 }

@@ -3010,8 +3010,6 @@ dependencies = [
 [[package]]
 name = "ipc-channel"
 version = "0.23.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf1d9c442a2ec790209da8a49f99f7dae0fad31ba24c9947b01ce5e8de8bddcb"
 dependencies = [
  "crossbeam-channel",
  "libc",
@@ -5333,7 +5331,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rustwolf"
-version = "0.7.0"
+version = "0.8.1"
 dependencies = [
  "adblock",
  "arboard",
@@ -5344,6 +5342,7 @@ dependencies = [
  "glow",
  "http",
  "rustls",
+ "rustwolf-shared",
  "serde",
  "serde_json",
  "servo",
@@ -5353,6 +5352,16 @@ dependencies = [
  "url",
  "windows-sys 0.59.0",
  "winit",
+]
+
+[[package]]
+name = "rustwolf-shared"
+version = "0.1.0"
+dependencies = [
+ "servo-base",
+ "servo-net-traits",
+ "servo-url",
+ "url",
 ]
 
 [[package]]
@@ -5634,8 +5643,6 @@ dependencies = [
 [[package]]
 name = "servo"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58a502704ce2fee976f20ee6192c575a3a77dfe844431f83cd4946da6e524985"
 dependencies = [
  "accesskit",
  "arboard",
@@ -6531,6 +6538,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "rustls-platform-verifier",
+ "rustwolf-shared",
  "sea-query",
  "sea-query-rusqlite",
  "serde",
@@ -6949,8 +6957,6 @@ dependencies = [
 [[package]]
 name = "servo-storage"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "346be02eac3b3be12d17a806b56076f2cb706adbe2aa1b3331964a77ec3a5856"
 dependencies = [
  "libc",
  "log",
@@ -6958,6 +6964,7 @@ dependencies = [
  "postcard",
  "rusqlite",
  "rustc-hash",
+ "rustwolf-shared",
  "sea-query",
  "sea-query-rusqlite",
  "serde",

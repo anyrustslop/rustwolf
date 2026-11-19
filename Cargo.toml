@@ -1,6 +1,6 @@
 ﻿[package]
 name = "rustwolf"
-version = "0.7.0"
+version = "0.8.1"
 edition = "2021"
 description = "RustWolf - a privacy-first web browser written in Rust, on the Servo engine"
 license = "MPL-2.0"
@@ -21,13 +21,14 @@ euclid = "0.22"
 url = "2.5"
 http = "1"
 adblock = { version = "0.13", default-features = false, features = ["embedded-domain-resolver", "full-regex-handling"] }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_JobObjects", "Win32_Security", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_Controls"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_JobObjects", "Win32_Security", "Win32_Security_Authorization", "Win32_System_Diagnostics_ToolHelp", "Win32_UI_WindowsAndMessaging", "Win32_Graphics_Gdi", "Win32_Graphics_Dwm", "Win32_UI_Controls", "Win32_System_Console", "Win32_System_Environment"] }
 ureq = "2"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 arboard = "3"
 net = { package = "servo-net", version = "0.8.0" }
+rustwolf-shared = { path = "patches/rustwolf-shared" }
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
 
 [profile.release]
@@ -39,3 +40,6 @@ strip = true
 # Servo's network crate with one fix (bigger HTTP/2 header limit, see patches/servo-net/connector.rs).
 [patch.crates-io]
 servo-net = { path = "patches/servo-net" }
+servo-storage = { path = "patches/servo-storage" }
+ipc-channel = { path = "patches/ipc-channel" }
+servo = { path = "patches/servo" }
