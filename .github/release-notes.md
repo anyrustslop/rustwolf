@@ -22,6 +22,14 @@ The full source code is attached as **Source code (zip / tar.gz)**.
 - WebRTC, WebGL, WebGPU, location, notifications, Bluetooth and more are switched off; permission requests are denied.
 - Private by default: cookies, cache and history stay in memory and are forgotten when RustWolf closes. No telemetry.
 
+## New in 0.8.3: security audit fixes
+RustWolf was attacked from inside its own sandbox and with fingerprinting bypass tricks; everything found is fixed except the items listed under "still open" in SECURITY.md.
+- **Sandbox:** a hacked page can no longer kill the browser, take screenshots, log your keys or see your clipboard (own invisible window station and desktop, locked browser process).
+- **Fixed a sandbox-escape bug** in the IPC changes: a hacked page could have made the browser fetch handles out of any other program. The browser now only takes handles from RustWolf's own page processes.
+- **Fingerprint:** CPU count and timezone are now set inside the engine, so fresh iframes and web workers can't reveal the real values; iframes get the same spoofing as the page; spoofed functions look native.
+- **Anti-ClickFix:** catches obfuscated commands (`p^ower^shell`, `pow""ershell`), network-path programs and more Windows tools.
+- Still open: a hacked page process could open its own internet connections (skipping Tor). Full report: SECURITY.md.
+
 ## New in 0.8.2
 - **Fingerprint fixes** (Tor Browser / Firefox crowd): the JavaScript engine now uses en-US instead of your PC's language (dates, numbers, `Intl`); only fonts every Windows 10/11 PC has are visible to sites (your extra fonts are hidden); Firefox's PDF-viewer plugins, `navigator.webdriver`, `-moz-` CSS and consistent screen-resolution queries; coarse timers (≈17 ms).
 - Page processes now always stop when RustWolf closes, even if it crashed.

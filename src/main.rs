@@ -1404,6 +1404,10 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     // Pipe permissions for the engine's processes (inherited by every page process).
     guard::set_pipe_security();
+    // Browser and sandbox launchers: a sandboxed page may not open (or kill) them.
+    if std::env::var_os("RUSTWOLF_PAGE_SANDBOXED").is_none() {
+        guard::protect_own_process();
+    }
     if !(args.len() >= 3 && args[1] == "--content-process") {
         // The browser process: page processes stop when it goes away.
         std::env::set_var("RUSTWOLF_BROWSER_PID", std::process::id().to_string());
@@ -1429,13 +1433,23 @@ fn main() {
             hardened
         };
         if std::env::var("RUSTWOLF_FINGERPRINT").is_ok_and(|v| v == "1") {
+            // Inside the engine, so it also holds in iframes and workers.
             guard::set_engine_locale_en_us();
+            guard::set_engine_timezone();
+            std::env::set_var("RUSTWOLF_REPORTED_CPUS", "4"); // read by the num_cpus patch
         }
         guard::lockdown_content_process(hardened);
         if std::env::var_os("RUSTWOLF_SANDBOX_TEST").is_some() {
             eprintln!("[sandbox] restricted copy: {}", std::env::var_os("RUSTWOLF_PAGE_SANDBOXED").is_some());
             eprintln!("[sandbox] page process can start programs: {}", !guard::job_forbids_child_processes());
             eprintln!("[sandbox] page process can read your files: {}", guard::can_read_user_files());
+            if std::env::var_os("RUSTWOLF_PAGE_SANDBOXED").is_some() {
+                // Later, so other page processes exist to attack too.
+                std::thread::spawn(|| {
+                    std::thread::sleep(std::time::Duration::from_secs(10));
+                    guard::sandbox_attack_report();
+                });
+            }
         }
         servo::run_content_process(args[2].clone());
         return;
@@ -1448,7 +1462,7 @@ fn main() {
     }
     // Tor Browser's timezone for the engine (page processes inherit it).
     if settings::Settings::load().fingerprint {
-        std::env::set_var("TZ", guard::TIMEZONE);
+        guard::set_engine_timezone();
         // Only standard Windows fonts are visible to pages (read by the servo-fonts patch).
         std::env::set_var("RUSTWOLF_FONT_ALLOWLIST", "1");
     }

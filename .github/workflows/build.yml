@@ -48,7 +48,7 @@ jobs:
           $m = cargo metadata --format-version 1 --locked | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0) { $m = cargo metadata --format-version 1 | ConvertFrom-Json }
           $bad = @()
-          foreach ($name in "servo", "servo-net", "servo-storage", "servo-fonts", "ipc-channel", "rustwolf-shared") {
+          foreach ($name in "servo", "servo-net", "servo-storage", "servo-fonts", "ipc-channel", "num_cpus", "rustwolf-shared") {
             $pkgs = @($m.packages | Where-Object { $_.name -eq $name })
             if ($pkgs.Count -eq 0) { $bad += "$name (missing)" }
             foreach ($p in $pkgs) { if ($p.source) { $bad += "$name $($p.version) from $($p.source)" } }

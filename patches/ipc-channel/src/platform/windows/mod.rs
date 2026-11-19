@@ -169,6 +169,135 @@ static PIPE_SECURITY: LazyLock<Option<PipeSecurity>> = LazyLock::new(|| {
 static MOVED_RECEIVERS: LazyLock<std::sync::Mutex<std::collections::HashMap<String, u32>>> =
     LazyLock::new(Default::default);
 
+/// RustWolf: may this process take handles out of process `pid`?
+///
+/// Messages say which process holds the handles they carry, and a page process controls its own
+/// messages. Without this check a hacked page process could make the browser duplicate handles out
+/// of *any* process the browser can open (your other programs) and get them sent back to it: a
+/// sandbox escape. So the browser only takes handles from itself and from RustWolf's own page
+/// processes: the same program, running at Low integrity (the sandbox) or started by this process.
+/// Sandboxed page processes skip the check: Windows already limits what they can open.
+fn rustwolf_may_take_handles_from(pid: u32) -> bool {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{
+        GetProcessTimes, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    static SANDBOXED: LazyLock<bool> =
+        LazyLock::new(|| std::env::var_os("RUSTWOLF_PAGE_SANDBOXED").is_some());
+    static TRUSTED: LazyLock<std::sync::Mutex<std::collections::HashSet<(u32, u64)>>> =
+        LazyLock::new(Default::default);
+    static OWN_EXE: LazyLock<Option<String>> = LazyLock::new(|| {
+        std::env::current_exe()
+            .ok()
+            .map(|p| p.to_string_lossy().to_lowercase())
+    });
+
+    if pid == *CURRENT_PROCESS_ID || *SANDBOXED {
+        return true;
+    }
+    unsafe {
+        let Ok(h) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return false;
+        };
+        let h = WinHandle::new(h);
+        // Identify the process by pid + start time, so a reused pid isn't trusted by mistake.
+        let (mut c, mut x, mut k, mut u) = (
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+            FILETIME::default(),
+        );
+        if GetProcessTimes(h.as_raw(), &mut c, &mut x, &mut k, &mut u).is_err() {
+            return false;
+        }
+        let key = (pid, ((c.dwHighDateTime as u64) << 32) | c.dwLowDateTime as u64);
+        if TRUSTED.lock().map(|t| t.contains(&key)).unwrap_or(false) {
+            return true;
+        }
+        // Same program?
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        if QueryFullProcessImageNameW(
+            h.as_raw(),
+            PROCESS_NAME_FORMAT(0),
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        let image = String::from_utf16_lossy(&buf[..len as usize]).to_lowercase();
+        if OWN_EXE.as_deref() != Some(image.as_str()) {
+            return false;
+        }
+        let ok = rustwolf_is_low_integrity(&h) || rustwolf_parent_of(pid) == Some(*CURRENT_PROCESS_ID);
+        if ok {
+            if let Ok(mut t) = TRUSTED.lock() {
+                t.insert(key);
+            }
+        }
+        ok
+    }
+}
+
+fn rustwolf_is_low_integrity(process: &WinHandle) -> bool {
+    use windows::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+        TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::OpenProcessToken;
+    unsafe {
+        let mut tok = HANDLE::default();
+        if OpenProcessToken(process.as_raw(), TOKEN_QUERY, &mut tok).is_err() {
+            return false;
+        }
+        let tok = WinHandle::new(tok);
+        let mut buf = [0u64; 16];
+        let mut len = 0u32;
+        if GetTokenInformation(
+            tok.as_raw(),
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr() as *mut _),
+            mem::size_of_val(&buf) as u32,
+            &mut len,
+        )
+        .is_err()
+        {
+            return false;
+        }
+        let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+        let count = *GetSidSubAuthorityCount(label.Label.Sid);
+        if count == 0 {
+            return false;
+        }
+        let rid = *GetSidSubAuthority(label.Label.Sid, count as u32 - 1);
+        rid < 0x2000 // below Medium
+    }
+}
+
+fn rustwolf_parent_of(pid: u32) -> Option<u32> {
+    use windows::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    unsafe {
+        let snap = WinHandle::new(CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0).ok()?);
+        let mut e = PROCESSENTRY32W {
+            dwSize: mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        Process32FirstW(snap.as_raw(), &mut e).ok()?;
+        loop {
+            if e.th32ProcessID == pid {
+                return Some(e.th32ParentProcessID);
+            }
+            Process32NextW(snap.as_raw(), &mut e).ok()?;
+        }
+    }
+}
+
 fn pipe_name(handle: HANDLE) -> Option<String> {
     use windows::Win32::Storage::FileSystem::{
         FileNameInfo, GetFileInformationByHandleEx, FILE_NAME_INFO,
@@ -336,6 +465,9 @@ impl OutOfBandMessage {
         if self.pull_from_process_id != 0 {
             return self.pull_handles();
         }
+        if !rustwolf_may_take_handles_from(self.target_process_id) {
+            return Err(WinError::from_hresult(HRESULT(0x80070005u32 as i32))); // access denied
+        }
         // get current process id and target process.
         let current_process = unsafe { GetCurrentProcess() };
         let target_process =
@@ -399,6 +531,9 @@ impl OutOfBandMessage {
 
     /// RustWolf: take the handles out of the sending process (closing them there).
     fn pull_handles(&mut self) -> Result<(), WinError> {
+        if !rustwolf_may_take_handles_from(self.pull_from_process_id) {
+            return Err(WinError::from_hresult(HRESULT(0x80070005u32 as i32))); // access denied
+        }
         let current_process = unsafe { GetCurrentProcess() };
         let source_process = if self.pull_from_process_id == *CURRENT_PROCESS_ID {
             WinHandle::new(CURRENT_PROCESS_HANDLE.as_raw())

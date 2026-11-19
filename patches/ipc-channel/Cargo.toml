@@ -125,4 +125,5 @@ features = [
     "Win32_Storage_FileSystem",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_System_Diagnostics_ToolHelp",
 ]

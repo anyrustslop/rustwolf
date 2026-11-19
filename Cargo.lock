@@ -3895,8 +3895,6 @@ dependencies = [
 [[package]]
 name = "num_cpus"
 version = "1.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91df4bbde75afed763b708b7eee1e8e7651e02d97f6d5dd763e89367e957b23b"
 dependencies = [
  "hermit-abi",
  "libc",
@@ -5331,7 +5329,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
 name = "rustwolf"
-version = "0.8.2"
+version = "0.8.3"
 dependencies = [
  "adblock",
  "arboard",
@@ -5342,6 +5340,7 @@ dependencies = [
  "glow",
  "http",
  "ipc-channel",
+ "num_cpus",
  "rustls",
  "rustwolf-shared",
  "serde",
